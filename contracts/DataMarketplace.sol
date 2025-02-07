@@ -11,8 +11,14 @@ import "./ConsensusValidator.sol";
 import "./PrivacyManager.sol";
 import "./ZKDataVerifier.sol";
 import "../lib/DataMarketErrors.sol";
+import "../lib/DataMarketInterface.sol";
 
-contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
+contract DataMarketplace is
+    IDataMarketplace,
+    ReentrancyGuard,
+    Ownable,
+    Pausable
+{
     using DataMarketErrors for *;
 
     uint8 public constant MAX_PRIVACY_LEVEL = 2;
@@ -21,11 +27,11 @@ contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
     uint256 public constant DISPUTE_PERIOD = 3 days;
     uint256 public constant EMERGENCY_PERIOD = 7 days;
 
-    DataEscrow public escrow;
-    P2PDataTransfer public transferProtocol;
-    ConsensusValidator public consensusManager;
-    PrivacyManager public privacyManager;
-    ZKDataVerifier public zkVerifier;
+    IDataEscrow public escrow;
+    IP2PDataTransfer public transferProtocol;
+    IConsensusValidator public consensusManager;
+    IPrivacyManager public privacyManager;
+    IZKDataVerifier public zkVerifier;
 
     struct Dataset {
         address seller;
@@ -133,11 +139,41 @@ contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
         address _zkVerifierAddress
     ) Ownable(msg.sender) {
         platformFee = _platformFee;
-        escrow = DataEscrow(_escrowAddress);
-        transferProtocol = P2PDataTransfer(_transferAddress);
-        consensusManager = ConsensusValidator(_consensusAddress);
-        privacyManager = PrivacyManager(_privacyAddress);
-        zkVerifier = ZKDataVerifier(_zkVerifierAddress);
+        escrow = IDataEscrow(_escrowAddress);
+        transferProtocol = IP2PDataTransfer(_transferAddress);
+        consensusManager = IConsensusValidator(_consensusAddress);
+        privacyManager = IPrivacyManager(_privacyAddress);
+        zkVerifier = IZKDataVerifier(_zkVerifierAddress);
+    }
+
+    function isDatasetListed(
+        string memory _datasetId
+    ) external view override returns (bool) {
+        uint256 id = uint256(keccak256(bytes(_datasetId)));
+
+        Dataset storage dataset = datasets[id];
+        return dataset.seller != address(0) && dataset.isActive;
+    }
+
+    function verifyDataIntegrity(
+        bytes32 _deliveryHash,
+        bytes32 _originalHash
+    ) external view override returns (bool) {
+        bool found = false;
+        uint256 datasetId;
+
+        for (uint256 i = 0; i < datasetCount; i++) {
+            if (datasets[i].dataHash == _originalHash) {
+                found = true;
+                datasetId = i;
+                break;
+            }
+        }
+
+        if (!found) return false;
+
+        Dataset storage dataset = datasets[datasetId];
+        return dataset.isActive && _deliveryHash == dataset.dataHash;
     }
 
     function checkTransferTimeout(bytes32 _transferId) external nonReentrant {
@@ -354,7 +390,8 @@ contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
 
         bytes32 escrowId = escrow.createEscrow{value: dataset.price}(
             payable(dataset.seller),
-            string(abi.encodePacked("dataset-", _datasetId))
+            string(abi.encodePacked("dataset-", _datasetId)),
+            dataset.dataHash
         );
 
         if (dataset.requiresVerification) {

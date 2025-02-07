@@ -5,25 +5,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
-
-interface IDataMarketplace {
-    function isDatasetListed(
-        string memory datasetId
-    ) external view returns (bool);
-
-    function verifyDataIntegrity(
-        bytes32 deliveryHash,
-        bytes32 originalHash
-    ) external view returns (bool);
-}
-
-interface IConsensusValidator {
-    function validateTransaction(
-        bytes32 transactionId
-    ) external view returns (bool);
-
-    function getValidatorCount() external view returns (uint256);
-}
+import "../lib/DataMarketInterface.sol";
 
 contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
     IDataMarketplace public marketplace;
@@ -39,17 +21,17 @@ contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
         bool isDisputed;
         string datasetId;
         bytes32 deliveryHash;
-        bytes32 zkProofHash; // Added for ZK proof reference
-        uint8 consensusStatus; // Added for consensus tracking
-        bytes32 encryptionProof; // Added for privacy verification
-        bytes32 dataHash; // Original data hash for verification
-        bytes32 privacyProof; // Privacy verification proof
-        uint8 encryptionLevel; // Level of encryption used
-        bytes encryptedMetadata; // Encrypted metadata
-        uint256 validatorCount; // Number of validators required
-        uint256 approvalCount; // Track number of approvals
-        uint256 rejectionCount; // Track number of rejections
-        mapping(address => bool) validators; // Track individual validators
+        bytes32 zkProofHash;
+        uint8 consensusStatus;
+        bytes32 encryptionProof;
+        bytes32 dataHash;
+        bytes32 privacyProof;
+        uint8 encryptionLevel;
+        bytes encryptedMetadata;
+        uint256 validatorCount;
+        uint256 approvalCount;
+        uint256 rejectionCount;
+        mapping(address => bool) validators;
     }
 
     mapping(bytes32 => EscrowTransaction) public transactions;
