@@ -16,6 +16,7 @@ contract ZKDataVerifier is IZKDataVerifier, Ownable, Pausable, ReentrancyGuard {
         uint256 formatScore;
         string failureReason;
         uint256 timestamp;
+        VerificationType verificationType;
     }
 
     struct ZKProof {
@@ -25,6 +26,7 @@ contract ZKDataVerifier is IZKDataVerifier, Ownable, Pausable, ReentrancyGuard {
         uint256 timestamp;
         bool isVerified;
         address verifier;
+        ProofType proofType;
     }
 
     struct DatasetMetadata {
@@ -51,15 +53,100 @@ contract ZKDataVerifier is IZKDataVerifier, Ownable, Pausable, ReentrancyGuard {
     mapping(uint256 => VerificationHistory[]) public verificationHistory;
 
     uint256 public constant VERIFICATION_COOLDOWN = 1 hours;
-    uint256 public constant MIN_SAMPLE_SIZE = 1024; // 1KB
+    uint256 public constant MIN_SAMPLE_SIZE = 1024;
     uint256 public constant MIN_COMPLETENESS_SCORE = 70;
     uint256 public constant MIN_FORMAT_SCORE = 80;
 
     event ProofVerified(uint256 indexed datasetId, bytes32 proof, bool success);
     event DatasetVerified(uint256 indexed datasetId, bool success, string failureReason);
     event VerificationResultUpdated(uint256 indexed datasetId, uint256 completenessScore, uint256 formatScore);
+    event IdentityVerified(uint256 indexed datasetId, address indexed user, bool success);
+    event PurchaseVerified(uint256 indexed datasetId, address indexed buyer, bool success);
+    event FormatVerified(uint256 indexed datasetId, bool success);
 
     constructor() Ownable(msg.sender) {}
+
+    function verifyIdentityProof(
+        uint256 _datasetId,
+        bytes32 _proof
+    ) external override nonReentrant whenNotPaused returns (bool) {
+        if (_proof == bytes32(0)) revert DataMarketErrors.InvalidProof();
+        if (usedProofs[_proof]) revert DataMarketErrors.ProofAlreadyVerified();
+
+        bool isValid = verifyProofLogic(_proof, bytes32(0), ProofType.Identity);
+
+        if (isValid) {
+            datasetProofs[_datasetId] = ZKProof({
+                proof: _proof,
+                publicInputs: bytes32(0),
+                commitment: keccak256(abi.encodePacked(_proof)),
+                timestamp: block.timestamp,
+                isVerified: true,
+                verifier: msg.sender,
+                proofType: ProofType.Identity
+            });
+
+            usedProofs[_proof] = true;
+            emit ProofVerified(_datasetId, _proof, true);
+            emit IdentityVerified(_datasetId, msg.sender, true);
+        }
+
+        return isValid;
+    }
+
+    function verifyPurchaseProof(
+        uint256 _datasetId,
+        bytes32 _proof,
+        bytes32 _purchaseData
+    ) external override nonReentrant whenNotPaused returns (bool) {
+        if (_proof == bytes32(0)) revert DataMarketErrors.InvalidProof();
+        if (usedProofs[_proof]) revert DataMarketErrors.ProofAlreadyVerified();
+
+        bool isValid = verifyProofLogic(_proof, _purchaseData, ProofType.Purchase);
+
+        if (isValid) {
+            datasetProofs[_datasetId] = ZKProof({
+                proof: _proof,
+                publicInputs: _purchaseData,
+                commitment: keccak256(abi.encodePacked(_proof, _purchaseData)),
+                timestamp: block.timestamp,
+                isVerified: true,
+                verifier: msg.sender,
+                proofType: ProofType.Purchase
+            });
+
+            usedProofs[_proof] = true;
+            emit ProofVerified(_datasetId, _proof, true);
+            emit PurchaseVerified(_datasetId, msg.sender, true);
+        }
+
+        return isValid;
+    }
+
+    function verifyProofLogic(
+        bytes32 _proof,
+        bytes32 _publicInputs,
+        ProofType _proofType
+    ) internal pure returns (bool) {
+        if (_proof == bytes32(0)) return false;
+
+        // Different verification logic based on proof type
+        if (_proofType == ProofType.Identity) {
+            // Verify identity-related proofs
+            // Example: age verification, jurisdiction check, etc.
+            return verifyIdentityLogic(_proof);
+        } else if (_proofType == ProofType.Purchase) {
+            // Verify purchase-related proofs
+            // Example: data integrity, payment verification, etc.
+            return verifyPurchaseLogic(_proof, _publicInputs);
+        } else if (_proofType == ProofType.Format) {
+            // Verify format-related proofs
+            // Example: data structure, schema validation, etc.
+            return verifyFormatLogic(_proof);
+        }
+
+        return false;
+    }
 
     function verifyDataset(
         uint256 _datasetId,
@@ -67,7 +154,8 @@ contract ZKDataVerifier is IZKDataVerifier, Ownable, Pausable, ReentrancyGuard {
         uint256 _size,
         bool _hasSample,
         uint256 _sampleSize,
-        bytes memory _formatProof
+        bytes memory _formatProof,
+        VerificationType _verificationType
     ) external override nonReentrant whenNotPaused returns (bool) {
         if (_size == 0) revert DataMarketErrors.InvalidProof();
         if (_hasSample && _sampleSize < MIN_SAMPLE_SIZE)
@@ -95,7 +183,8 @@ contract ZKDataVerifier is IZKDataVerifier, Ownable, Pausable, ReentrancyGuard {
             completenessScore: completenessScore,
             formatScore: formatScore,
             failureReason: failureReason,
-            timestamp: block.timestamp
+            timestamp: block.timestamp,
+            verificationType: _verificationType
         });
 
         datasetsMetadata[_datasetId].isVerified = success;
@@ -113,7 +202,8 @@ contract ZKDataVerifier is IZKDataVerifier, Ownable, Pausable, ReentrancyGuard {
     function verifyZKProof(
         uint256 _datasetId,
         bytes32 _proof,
-        bytes32 _publicInputs
+        bytes32 _publicInputs,
+        ProofType _proofType
     ) external override nonReentrant whenNotPaused returns (bool) {
         if (_proof == bytes32(0)) revert DataMarketErrors.InvalidProof();
         if (usedProofs[_proof]) revert DataMarketErrors.ProofAlreadyVerified();
@@ -127,7 +217,8 @@ contract ZKDataVerifier is IZKDataVerifier, Ownable, Pausable, ReentrancyGuard {
                 commitment: keccak256(abi.encodePacked(_proof, _publicInputs)),
                 timestamp: block.timestamp,
                 isVerified: true,
-                verifier: msg.sender
+                verifier: msg.sender,
+                proofType: _proofType
             });
 
             usedProofs[_proof] = true;
@@ -260,5 +351,27 @@ contract ZKDataVerifier is IZKDataVerifier, Ownable, Pausable, ReentrancyGuard {
 
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    // Add helper functions for different verification types
+    function verifyIdentityLogic(bytes32 _proof) internal pure returns (bool) {
+        // Implement identity verification logic
+        // For now, return true if proof is not empty
+        return _proof != bytes32(0);
+    }
+
+    function verifyPurchaseLogic(
+        bytes32 _proof,
+        bytes32 _publicInputs
+    ) internal pure returns (bool) {
+        // Implement purchase verification logic
+        // For now, basic check that both inputs are valid
+        return _proof != bytes32(0) && _publicInputs != bytes32(0);
+    }
+
+    function verifyFormatLogic(bytes32 _proof) internal pure returns (bool) {
+        // Implement format verification logic
+        // For now, return true if proof is not empty
+        return _proof != bytes32(0);
     }
 }

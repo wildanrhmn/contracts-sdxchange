@@ -21,7 +21,7 @@ contract DataMarketplace is
 {
     using DataMarketErrors for *;
 
-    uint8 public constant MAX_PRIVACY_LEVEL = 2;
+    PrivacyLevel public constant MAX_PRIVACY_LEVEL = PrivacyLevel.Private;
     uint8 public constant CONSENSUS_THRESHOLD = 3;
     uint256 public constant TRANSFER_TIMEOUT = 24 hours;
     uint256 public constant DISPUTE_PERIOD = 3 days;
@@ -34,43 +34,52 @@ contract DataMarketplace is
     IZKDataVerifier public zkVerifier;
 
     struct Dataset {
+        // Basic info
         address seller;
         string metadataURI;
         string sampleDataURI;
-        uint256 price;
-        bool isActive;
-        uint256 totalSales;
-        uint256 validationScore;
-        bytes encryptedKey;
-        bytes32 dataHash;
         string dataType;
         uint256 size;
+        // Status & metrics
+        bool isActive;
+        uint256 price;
+        uint256 totalSales;
+        uint256 validationScore;
+        // Security & verification
+        bytes encryptedKey;
+        bytes32 dataHash;
         bytes formatProof;
-        bool requiresVerification;
         bytes32 zkVerificationKey;
         bytes32 transferId;
-        uint8 privacyLevel;
+        PrivacyLevel privacyLevel;
+        VerificationType verificationType;
     }
 
     struct Purchase {
+        // Basic info
         address buyer;
         uint256 timestamp;
+        bytes32 escrowId;
+        // Status flags
         bool completed;
         bool disputed;
-        bytes32 escrowId;
         bool zkVerified;
+        bool accessGranted;
+        // Verification data
         bytes32 accessProofHash;
         uint8 consensusStatus;
         bytes32 zkProof;
         bytes32 transferStatus;
-        bool accessGranted;
     }
 
     struct Transfer {
+        // Identifiers
         bytes32 transferId;
         uint256 datasetId;
+        // Participants
         address sender;
         address receiver;
+        // Timing & status
         uint256 startTime;
         uint256 completedTime;
         bool isCompleted;
@@ -85,50 +94,21 @@ contract DataMarketplace is
     uint256 public datasetCount;
     uint256 public platformFee;
 
-    event DatasetListed(
-        uint256 indexed datasetId,
-        address indexed seller,
-        uint256 price
-    );
-    event DatasetPurchased(
-        uint256 indexed datasetId,
-        address indexed buyer,
-        bytes32 escrowId
-    );
-    event DatasetUpdated(
-        uint256 indexed datasetId,
-        uint256 newPrice,
-        bool isActive
-    );
+    event DatasetListed(uint256 indexed datasetId, address indexed seller, uint256 price);
+    event DatasetPurchased(uint256 indexed datasetId, address indexed buyer, bytes32 escrowId);
+    event DatasetUpdated(uint256 indexed datasetId, uint256 newPrice, bool isActive);
     event DisputeRaised(uint256 indexed datasetId, address indexed buyer);
-    event DisputeResolved(
-        uint256 indexed datasetId,
-        address indexed buyer,
-        bool buyerRefunded
-    );
+    event DisputeResolved(uint256 indexed datasetId, address indexed buyer, bool buyerRefunded);
     event AccessGranted(uint256 indexed datasetId, address indexed buyer);
     event AccessRevoked(uint256 indexed datasetId, address indexed buyer);
-    event TransferInitiated(
-        bytes32 indexed transferId,
-        uint256 indexed datasetId
-    );
-    event TransferCompleted(
-        bytes32 indexed transferId,
-        uint256 indexed datasetId
-    );
-    event ZKProofVerified(
-        uint256 indexed datasetId,
-        address indexed buyer,
-        bool success
-    );
+    event TransferInitiated(bytes32 indexed transferId, uint256 indexed datasetId);
+    event TransferCompleted(bytes32 indexed transferId, uint256 indexed datasetId);
+    event ZKProofVerified(uint256 indexed datasetId, address indexed buyer, bool success);
     event ConsensusStatusUpdated(uint256 indexed datasetId, uint8 status);
     event PrivacyLevelChanged(uint256 indexed datasetId, uint8 newLevel);
     event MetadataUpdated(uint256 indexed datasetId, string newMetadataURI);
     event EmergencyWithdrawal(uint256 indexed datasetId, address indexed user);
-    event TransferTimedOut(
-        bytes32 indexed transferId,
-        uint256 indexed datasetId
-    );
+    event TransferTimedOut(bytes32 indexed transferId, uint256 indexed datasetId);
 
     constructor(
         uint256 _platformFee,
@@ -270,7 +250,7 @@ contract DataMarketplace is
         uint256 _offset,
         uint256 _limit
     ) external view returns (uint256[] memory) {
-        require(_offset < datasetCount, "Offset out of bounds");
+        if (_offset >= datasetCount) revert DataMarketErrors.InvalidPaginationParams();
 
         uint256 remaining = datasetCount - _offset;
         uint256 count = remaining < _limit ? remaining : _limit;
@@ -297,18 +277,17 @@ contract DataMarketplace is
         uint256 _size,
         uint256 _sampleSize,
         bytes memory _formatProof,
-        bool _requiresVerification,
+        VerificationType _verificationType,
         bytes32 _zkVerificationKey,
-        uint8 _privacyLevel,
+        PrivacyLevel _privacyLevel,
         bytes memory _encryptedMetadata
     ) external whenNotPaused returns (uint256) {
-        require(bytes(_metadataURI).length > 0, "Metadata URI required");
-        require(bytes(_sampleDataURI).length > 0, "Sample data URI required");
-        require(_price > 0, "Price must be greater than 0");
-        require(_privacyLevel <= 2, "Invalid privacy level");
-        require(_size > 0, "Dataset size must be greater than 0");
-        require(_sampleSize <= _size, "Sample size exceeds dataset size");
-        require(_encryptedKey.length > 0, "Encrypted key required");
+        if (bytes(_metadataURI).length == 0) revert DataMarketErrors.InvalidMetadataURI();
+        if (bytes(_sampleDataURI).length == 0) revert DataMarketErrors.InvalidSampleDataURI();
+        if (_price == 0) revert DataMarketErrors.InvalidPrice();
+        if (_size == 0) revert DataMarketErrors.InvalidDatasetSize();
+        if (_sampleSize > _size) revert DataMarketErrors.InvalidSampleSize();
+        if (_encryptedKey.length == 0) revert DataMarketErrors.InvalidEncryptedKey();
 
         uint256 datasetId = datasetCount++;
 
@@ -318,12 +297,13 @@ contract DataMarketplace is
             _size,
             true,
             _sampleSize,
-            _formatProof
+            _formatProof,
+            _verificationType
         );
 
-        require(isVerified, "Dataset verification failed");
+        if (!isVerified) revert DataMarketErrors.VerificationFailed();
 
-        if (_privacyLevel > 0) {
+        if (_privacyLevel != PrivacyLevel.Public) {
             bytes32 txHash = keccak256(
                 abi.encodePacked(datasetId, msg.sender, block.timestamp)
             );
@@ -331,7 +311,7 @@ contract DataMarketplace is
                 txHash,
                 _encryptedMetadata,
                 _zkVerificationKey,
-                _privacyLevel
+                uint8(_privacyLevel)
             );
         }
 
@@ -348,7 +328,7 @@ contract DataMarketplace is
             dataType: _dataType,
             size: _size,
             formatProof: _formatProof,
-            requiresVerification: _requiresVerification,
+            verificationType: _verificationType,
             zkVerificationKey: _zkVerificationKey,
             transferId: bytes32(0),
             privacyLevel: _privacyLevel
@@ -364,21 +344,22 @@ contract DataMarketplace is
         bytes32 _zkProof
     ) external payable nonReentrant whenNotPaused {
         Dataset storage dataset = datasets[_datasetId];
-        require(dataset.isActive, "Dataset not available");
-        require(msg.value >= dataset.price, "Insufficient payment");
-        require(
-            dataset.privacyLevel == 0 ||
-                authorizedBuyers[_datasetId][msg.sender],
-            "Not authorized to purchase private dataset"
-        );
+        if (!dataset.isActive) revert DataMarketErrors.DatasetNotAvailable();
+        if (msg.value < dataset.price) revert DataMarketErrors.InsufficientPayment();
+        if (dataset.privacyLevel != PrivacyLevel.Public && !authorizedBuyers[_datasetId][msg.sender]) {
+            revert DataMarketErrors.NotAuthorizedForPrivateDataset();
+        }
 
-        if (dataset.requiresVerification) {
-            bool isValid = zkVerifier.verifyZKProof(
+        if (dataset.verificationType == VerificationType.ZKProof) {
+            bool proofValid = zkVerifier.verifyZKProof(
                 _datasetId,
                 _zkProof,
-                keccak256(abi.encodePacked(dataset.dataHash, msg.sender))
+                keccak256(abi.encodePacked(dataset.dataHash, msg.sender)),
+                ProofType.Purchase
             );
-            require(isValid, "ZK proof verification failed");
+            if (!proofValid) revert DataMarketErrors.ZKVerificationRequired();
+        } else if (dataset.verificationType == VerificationType.Basic) {
+            if (!verifyBasicIntegrity(dataset.dataHash)) revert DataMarketErrors.InvalidDataHash();
         }
 
         bytes32 transferId = transferProtocol.initiateTransfer(
@@ -394,20 +375,13 @@ contract DataMarketplace is
             dataset.dataHash
         );
 
-        if (dataset.requiresVerification) {
-            require(
-                zkVerifier.verifyZKProof(_datasetId, _zkProof, bytes32(0)),
-                "ZK proof verification failed"
-            );
-        }
-
         purchases[_datasetId][msg.sender] = Purchase({
             buyer: msg.sender,
             timestamp: block.timestamp,
             completed: false,
             disputed: false,
             escrowId: escrowId,
-            zkVerified: dataset.requiresVerification ? true : false,
+            zkVerified: dataset.verificationType == VerificationType.ZKProof,
             accessProofHash: bytes32(0),
             consensusStatus: 0,
             zkProof: _zkProof,
@@ -439,7 +413,7 @@ contract DataMarketplace is
         uint256 _chunkIndex
     ) external nonReentrant whenNotPaused {
         Purchase storage purchase = purchases[_datasetId][msg.sender];
-        require(!purchase.completed, "Transfer already completed");
+        if (purchase.completed) revert DataMarketErrors.AlreadyCompleted();
 
         transferProtocol.confirmChunk(purchase.transferStatus, _chunkIndex);
 
@@ -509,13 +483,14 @@ contract DataMarketplace is
         if (purchase.escrowId == bytes32(0))
             revert DataMarketErrors.DatasetNotFound(_datasetId);
         if (purchase.zkVerified) revert DataMarketErrors.AlreadyCompleted();
-        if (!dataset.requiresVerification)
+        if (dataset.verificationType != VerificationType.ZKProof)
             revert DataMarketErrors.UnauthorizedAccess(msg.sender);
 
         bool isValid = zkVerifier.verifyZKProof(
             _datasetId,
             _proof,
-            dataset.zkVerificationKey
+            dataset.zkVerificationKey,
+            ProofType.Purchase
         );
 
         if (isValid) {
@@ -540,12 +515,15 @@ contract DataMarketplace is
         emit MetadataUpdated(_datasetId, _newMetadataURI);
     }
 
-    function updatePrivacyLevel(uint256 _datasetId, uint8 _newLevel) external {
+    function updatePrivacyLevel(
+        uint256 _datasetId,
+        PrivacyLevel _newLevel
+    ) external {
         Dataset storage dataset = datasets[_datasetId];
         if (msg.sender != dataset.seller)
             revert DataMarketErrors.UnauthorizedAccess(msg.sender);
-        if (_newLevel > MAX_PRIVACY_LEVEL)
-            revert DataMarketErrors.InvalidPrivacyLevel(_newLevel);
+        if (_newLevel == PrivacyLevel.Private)
+            revert DataMarketErrors.InvalidPrivacyLevel(uint8(_newLevel));
 
         bytes32 txHash = keccak256(
             abi.encodePacked(_datasetId, msg.sender, block.timestamp)
@@ -554,17 +532,17 @@ contract DataMarketplace is
             txHash,
             dataset.encryptedKey,
             dataset.zkVerificationKey,
-            _newLevel
+            uint8(_newLevel)
         );
 
         dataset.privacyLevel = _newLevel;
-        emit PrivacyLevelChanged(_datasetId, _newLevel);
+        emit PrivacyLevelChanged(_datasetId, uint8(_newLevel));
     }
 
     function grantAccess(uint256 _datasetId, address _buyer) external {
         Dataset storage dataset = datasets[_datasetId];
-        require(msg.sender == dataset.seller, "Not dataset owner");
-        require(dataset.privacyLevel > 0, "Dataset is public");
+        if (msg.sender != dataset.seller) revert DataMarketErrors.NotDatasetOwner();
+        if (dataset.privacyLevel == PrivacyLevel.Public) revert DataMarketErrors.DatasetIsPublic();
 
         authorizedBuyers[_datasetId][_buyer] = true;
         emit AccessGranted(_datasetId, _buyer);
@@ -572,8 +550,8 @@ contract DataMarketplace is
 
     function revokeAccess(uint256 _datasetId, address _buyer) external {
         Dataset storage dataset = datasets[_datasetId];
-        require(msg.sender == dataset.seller, "Not dataset owner");
-        require(dataset.privacyLevel > 0, "Dataset is public");
+        if (msg.sender != dataset.seller) revert DataMarketErrors.NotDatasetOwner();
+        if (dataset.privacyLevel == PrivacyLevel.Public) revert DataMarketErrors.DatasetIsPublic();
 
         authorizedBuyers[_datasetId][_buyer] = false;
         emit AccessRevoked(_datasetId, _buyer);
@@ -608,18 +586,16 @@ contract DataMarketplace is
         (, , bool consensusReached, bool approved, , ) = consensusManager
             .getValidationDetails(purchase.escrowId);
 
-        if (!consensusReached) {
-            revert DataMarketErrors.ConsensusNotReached();
-        }
-        if (!approved) {
-            revert("Consensus rejected");
-        }
-        if (purchase.escrowId == bytes32(0))
-            revert DataMarketErrors.DatasetNotFound(_datasetId);
+        if (!consensusReached) revert DataMarketErrors.ConsensusNotReached();
+        if (!approved) revert DataMarketErrors.ConsensusRejected();
+        if (purchase.escrowId == bytes32(0)) revert DataMarketErrors.DatasetNotFound(_datasetId);
         if (purchase.completed) revert DataMarketErrors.AlreadyCompleted();
 
-        if (dataset.requiresVerification && !purchase.zkVerified) {
-            revert DataMarketErrors.UnauthorizedAccess(msg.sender);
+        if (
+            dataset.verificationType != VerificationType.ZKProof &&
+            !purchase.zkVerified
+        ) {
+            revert DataMarketErrors.ZKVerificationRequired();
         }
 
         if (!transfers[purchase.transferStatus].isCompleted) {
@@ -640,7 +616,7 @@ contract DataMarketplace is
         bytes32 _deliveryProof
     ) external nonReentrant whenNotPaused {
         Purchase storage purchase = purchases[_datasetId][msg.sender];
-        require(!purchase.completed, "Transfer already completed");
+        if (purchase.completed) revert DataMarketErrors.AlreadyCompleted();
 
         transferProtocol.confirmTransfer(
             purchase.transferStatus,
@@ -659,7 +635,7 @@ contract DataMarketplace is
         bool _isActive
     ) external whenNotPaused {
         Dataset storage dataset = datasets[_datasetId];
-        require(dataset.seller == msg.sender, "Not dataset owner");
+        if (dataset.seller != msg.sender) revert DataMarketErrors.NotDatasetOwner();
 
         if (_newPrice > 0) {
             dataset.price = _newPrice;
@@ -671,8 +647,8 @@ contract DataMarketplace is
 
     function raiseDispute(uint256 _datasetId) external whenNotPaused {
         Purchase storage purchase = purchases[_datasetId][msg.sender];
-        require(purchase.escrowId != bytes32(0), "No purchase found");
-        require(!purchase.disputed, "Already disputed");
+        if (purchase.escrowId == bytes32(0)) revert DataMarketErrors.PurchaseNotFound();
+        if (purchase.disputed) revert DataMarketErrors.AlreadyDisputed();
 
         escrow.raiseDispute(purchase.escrowId);
 
@@ -686,7 +662,7 @@ contract DataMarketplace is
         bool _refundBuyer
     ) external onlyOwner whenNotPaused {
         Purchase storage purchase = purchases[_datasetId][_buyer];
-        require(purchase.disputed, "No dispute exists");
+        if (!purchase.disputed) revert DataMarketErrors.NoDisputeExists();
 
         escrow.resolveDispute(purchase.escrowId, _refundBuyer);
 
@@ -702,7 +678,7 @@ contract DataMarketplace is
     }
 
     function updatePlatformFee(uint256 _newFee) external onlyOwner {
-        require(_newFee <= 1000, "Fee cannot exceed 100%");
+        if (_newFee > 1000) revert DataMarketErrors.InvalidPlatformFee();
         platformFee = _newFee;
     }
 
@@ -714,22 +690,21 @@ contract DataMarketplace is
         _unpause();
     }
 
-    function getUserDatasets(
-        address _user
-    ) external view returns (uint256[] memory) {
-        return userDatasets[_user];
-    }
-
     function hasPurchased(
         uint256 _datasetId,
         address _user
     ) external view returns (bool) {
         return purchases[_datasetId][_user].completed;
     }
-
     function withdrawBalance() external onlyOwner {
         uint256 balance = address(this).balance;
         (bool success, ) = msg.sender.call{value: balance}("");
-        require(success, "Transfer failed");
+        if (!success) revert DataMarketErrors.TransferFailed();
+    }
+
+    function verifyBasicIntegrity(
+        bytes32 _dataHash
+    ) internal pure returns (bool) {
+        return _dataHash != bytes32(0);
     }
 }

@@ -2,7 +2,7 @@
 pragma solidity ^0.8.28;
 
 library DataMarketErrors {
-    // Existing errors
+    // Core marketplace errors
     error DatasetNotFound(uint256 datasetId);
     error UnauthorizedAccess(address caller);
     error InvalidPrivacyLevel(uint8 level);
@@ -12,6 +12,28 @@ library DataMarketErrors {
     error ConsensusNotReached();
     error AlreadyCompleted();
     error InvalidAmount();
+    error DatasetNotAvailable();
+    error InsufficientPayment();
+    error NotDatasetOwner();
+    error DatasetIsPublic();
+    error InvalidMetadataURI();
+    error InvalidSampleDataURI();
+    error InvalidPrice();
+    error InvalidDatasetSize();
+    error InvalidSampleSize();
+    error InvalidEncryptedKey();
+    error PurchaseNotFound();
+    error AlreadyDisputed();
+    error NoDisputeExists();
+    error InvalidPlatformFee();
+    error TransferFailed();
+    error InvalidDeliveryHash();
+    error InvalidPaginationParams();
+    error EmergencyPeriodNotEnded();
+    error ConsensusRejected();
+    error ZKVerificationRequired();
+    error InvalidDataHash();
+    error NotAuthorizedForPrivateDataset();
 
     // Add new errors needed for ZKDataVerifier
     error InvalidProof();
@@ -57,11 +79,9 @@ library DataMarketErrors {
     error FundsAlreadyReleased();
     error FundsAlreadyRefunded();
     error DisputeAlreadyRaised();
-    error NoDisputeExists();
     error DisputePeriodExpired();
     error AutoReleasePeriodNotEnded();
     error InvalidFee();
     error NoTokensToWithdraw();
-    error TransferFailed();
     error FeeTransferFailed();
 }
