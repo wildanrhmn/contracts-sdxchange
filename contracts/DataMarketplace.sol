@@ -6,11 +6,26 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "./DataEscrow.sol";
-import "./IDataVerifier.sol";
+import "./P2PDataTransfer.sol";
+import "./ConsensusValidator.sol";
+import "./PrivacyManager.sol";
+import "./ZKDataVerifier.sol";
+import "../lib/DataMarketErrors.sol";
 
 contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
+    using DataMarketErrors for *;
+
+    uint8 public constant MAX_PRIVACY_LEVEL = 2;
+    uint8 public constant CONSENSUS_THRESHOLD = 3;
+    uint256 public constant TRANSFER_TIMEOUT = 24 hours;
+    uint256 public constant DISPUTE_PERIOD = 3 days;
+    uint256 public constant EMERGENCY_PERIOD = 7 days;
+
     DataEscrow public escrow;
-    IDataVerifier public verifier;
+    P2PDataTransfer public transferProtocol;
+    ConsensusValidator public consensusManager;
+    PrivacyManager public privacyManager;
+    ZKDataVerifier public zkVerifier;
 
     struct Dataset {
         address seller;
@@ -26,6 +41,9 @@ contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
         uint256 size;
         bytes formatProof;
         bool requiresVerification;
+        bytes32 zkVerificationKey;
+        bytes32 transferId;
+        uint8 privacyLevel;
     }
 
     struct Purchase {
@@ -37,45 +55,126 @@ contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
         bool zkVerified;
         bytes32 accessProofHash;
         uint8 consensusStatus;
+        bytes32 zkProof;
+        bytes32 transferStatus;
+        bool accessGranted;
+    }
+
+    struct Transfer {
+        bytes32 transferId;
+        uint256 datasetId;
+        address sender;
+        address receiver;
+        uint256 startTime;
+        uint256 completedTime;
+        bool isCompleted;
     }
 
     mapping(uint256 => Dataset) public datasets;
     mapping(uint256 => mapping(address => Purchase)) public purchases;
     mapping(address => uint256[]) public userDatasets;
     mapping(bytes32 => uint256) public escrowToDataset;
+    mapping(uint256 => mapping(address => bool)) public authorizedBuyers;
+    mapping(bytes32 => Transfer) public transfers;
     uint256 public datasetCount;
     uint256 public platformFee;
 
-    event DatasetListed(uint256 indexed datasetId, address indexed seller, uint256 price);
-    event DatasetPurchased(uint256 indexed datasetId, address indexed buyer, bytes32 escrowId);
-    event DatasetUpdated(uint256 indexed datasetId, uint256 newPrice, bool isActive);
+    event DatasetListed(
+        uint256 indexed datasetId,
+        address indexed seller,
+        uint256 price
+    );
+    event DatasetPurchased(
+        uint256 indexed datasetId,
+        address indexed buyer,
+        bytes32 escrowId
+    );
+    event DatasetUpdated(
+        uint256 indexed datasetId,
+        uint256 newPrice,
+        bool isActive
+    );
     event DisputeRaised(uint256 indexed datasetId, address indexed buyer);
-    event DisputeResolved(uint256 indexed datasetId, address indexed buyer, bool buyerRefunded);
-    event EscrowAddressUpdated(address newEscrow);
-    event ProofVerified(uint256 indexed datasetId, bytes32 proofHash, bool success);
-    event ConsensusValidated(uint256 indexed datasetId, bytes32 indexed escrowId, bool approved);
-    event VerifierUpdated(address newVerifier);
+    event DisputeResolved(
+        uint256 indexed datasetId,
+        address indexed buyer,
+        bool buyerRefunded
+    );
+    event AccessGranted(uint256 indexed datasetId, address indexed buyer);
+    event AccessRevoked(uint256 indexed datasetId, address indexed buyer);
+    event TransferInitiated(
+        bytes32 indexed transferId,
+        uint256 indexed datasetId
+    );
+    event TransferCompleted(
+        bytes32 indexed transferId,
+        uint256 indexed datasetId
+    );
+    event ZKProofVerified(
+        uint256 indexed datasetId,
+        address indexed buyer,
+        bool success
+    );
+    event ConsensusStatusUpdated(uint256 indexed datasetId, uint8 status);
+    event PrivacyLevelChanged(uint256 indexed datasetId, uint8 newLevel);
+    event MetadataUpdated(uint256 indexed datasetId, string newMetadataURI);
+    event EmergencyWithdrawal(uint256 indexed datasetId, address indexed user);
+    event TransferTimedOut(
+        bytes32 indexed transferId,
+        uint256 indexed datasetId
+    );
 
     constructor(
         uint256 _platformFee,
         address _escrowAddress,
-        address _verifierAddress
+        address _transferAddress,
+        address _consensusAddress,
+        address _privacyAddress,
+        address _zkVerifierAddress
     ) Ownable(msg.sender) {
         platformFee = _platformFee;
         escrow = DataEscrow(_escrowAddress);
-        verifier = IDataVerifier(_verifierAddress);
+        transferProtocol = P2PDataTransfer(_transferAddress);
+        consensusManager = ConsensusValidator(_consensusAddress);
+        privacyManager = PrivacyManager(_privacyAddress);
+        zkVerifier = ZKDataVerifier(_zkVerifierAddress);
     }
 
-    function setVerifier(address _newVerifier) external onlyOwner {
-        require(_newVerifier != address(0), "Invalid address");
-        verifier = IDataVerifier(_newVerifier);
-        emit VerifierUpdated(_newVerifier);
+    function checkTransferTimeout(bytes32 _transferId) external nonReentrant {
+        Transfer storage transfer = transfers[_transferId];
+        if (transfer.isCompleted) revert DataMarketErrors.AlreadyCompleted();
+        if (block.timestamp <= transfer.startTime + TRANSFER_TIMEOUT) {
+            revert DataMarketErrors.TransferTimeout(_transferId);
+        }
+
+        transfer.isCompleted = true;
+        Purchase storage purchase = purchases[transfer.datasetId][
+            transfer.receiver
+        ];
+
+        escrow.resolveDispute(purchase.escrowId, true);
+
+        purchase.completed = false;
+        purchase.disputed = false;
+
+        emit TransferTimedOut(_transferId, transfer.datasetId);
     }
 
-    function updateEscrowAddress(address _newEscrow) external onlyOwner {
-        require(_newEscrow != address(0), "Invalid address");
-        escrow = DataEscrow(_newEscrow);
-        emit EscrowAddressUpdated(_newEscrow);
+    function emergencyWithdraw(
+        uint256 _datasetId
+    ) external onlyOwner nonReentrant {
+        Purchase storage purchase = purchases[_datasetId][msg.sender];
+        if (purchase.escrowId == bytes32(0))
+            revert DataMarketErrors.DatasetNotFound(_datasetId);
+        if (block.timestamp <= purchase.timestamp + EMERGENCY_PERIOD) {
+            revert DataMarketErrors.DisputePeriodNotEnded();
+        }
+
+        escrow.resolveDispute(purchase.escrowId, true);
+        purchase.completed = false;
+        purchase.disputed = false;
+
+        emit EmergencyWithdrawal(_datasetId, msg.sender);
     }
 
     function getAllDatasets() external view returns (uint256[] memory) {
@@ -162,15 +261,22 @@ contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
         uint256 _size,
         uint256 _sampleSize,
         bytes memory _formatProof,
-        bool _requiresVerification
+        bool _requiresVerification,
+        bytes32 _zkVerificationKey,
+        uint8 _privacyLevel,
+        bytes memory _encryptedMetadata
     ) external whenNotPaused returns (uint256) {
         require(bytes(_metadataURI).length > 0, "Metadata URI required");
         require(bytes(_sampleDataURI).length > 0, "Sample data URI required");
         require(_price > 0, "Price must be greater than 0");
+        require(_privacyLevel <= 2, "Invalid privacy level");
+        require(_size > 0, "Dataset size must be greater than 0");
+        require(_sampleSize <= _size, "Sample size exceeds dataset size");
+        require(_encryptedKey.length > 0, "Encrypted key required");
 
         uint256 datasetId = datasetCount++;
 
-        bool isVerified = verifier.verifyDataset(
+        bool isVerified = zkVerifier.verifyDataset(
             datasetId,
             _dataType,
             _size,
@@ -178,7 +284,20 @@ contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
             _sampleSize,
             _formatProof
         );
+
         require(isVerified, "Dataset verification failed");
+
+        if (_privacyLevel > 0) {
+            bytes32 txHash = keccak256(
+                abi.encodePacked(datasetId, msg.sender, block.timestamp)
+            );
+            privacyManager.createPrivateTransaction(
+                txHash,
+                _encryptedMetadata,
+                _zkVerificationKey,
+                _privacyLevel
+            );
+        }
 
         datasets[datasetId] = Dataset({
             seller: msg.sender,
@@ -193,7 +312,10 @@ contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
             dataType: _dataType,
             size: _size,
             formatProof: _formatProof,
-            requiresVerification: _requiresVerification
+            requiresVerification: _requiresVerification,
+            zkVerificationKey: _zkVerificationKey,
+            transferId: bytes32(0),
+            privacyLevel: _privacyLevel
         });
 
         userDatasets[msg.sender].push(datasetId);
@@ -201,43 +323,33 @@ contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
         return datasetId;
     }
 
-    function submitProof(
-        uint256 _datasetId,
-        bytes calldata _proof
-    ) external whenNotPaused {
-        Dataset storage dataset = datasets[_datasetId];
-        Purchase storage purchase = purchases[_datasetId][msg.sender];
-
-        require(purchase.escrowId != bytes32(0), "No purchase found");
-        require(!purchase.zkVerified, "Already verified");
-        require(dataset.requiresVerification, "Verification not required");
-
-        bool isValid = verifier.verifyDataset(
-            _datasetId,
-            dataset.dataType,
-            dataset.size,
-            true,
-            dataset.size * 5 / 100,
-            _proof
-        );
-        require(isValid, "Proof verification failed");
-
-        purchase.zkVerified = true;
-        bytes32 proofHash = keccak256(_proof);
-        emit ProofVerified(_datasetId, proofHash, true);
-    }
-
     function purchaseDataset(
         uint256 _datasetId,
-        bytes calldata _accessProof
+        bytes32 _zkProof
     ) external payable nonReentrant whenNotPaused {
         Dataset storage dataset = datasets[_datasetId];
         require(dataset.isActive, "Dataset not available");
         require(msg.value >= dataset.price, "Insufficient payment");
-        require(dataset.seller != msg.sender, "Cannot buy own dataset");
         require(
-            !purchases[_datasetId][msg.sender].completed,
-            "Already purchased"
+            dataset.privacyLevel == 0 ||
+                authorizedBuyers[_datasetId][msg.sender],
+            "Not authorized to purchase private dataset"
+        );
+
+        if (dataset.requiresVerification) {
+            bool isValid = zkVerifier.verifyZKProof(
+                _datasetId,
+                _zkProof,
+                keccak256(abi.encodePacked(dataset.dataHash, msg.sender))
+            );
+            require(isValid, "ZK proof verification failed");
+        }
+
+        bytes32 transferId = transferProtocol.initiateTransfer(
+            msg.sender,
+            dataset.dataHash,
+            dataset.encryptedKey,
+            dataset.size
         );
 
         bytes32 escrowId = escrow.createEscrow{value: dataset.price}(
@@ -245,25 +357,208 @@ contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
             string(abi.encodePacked("dataset-", _datasetId))
         );
 
+        if (dataset.requiresVerification) {
+            require(
+                zkVerifier.verifyZKProof(_datasetId, _zkProof, bytes32(0)),
+                "ZK proof verification failed"
+            );
+        }
+
         purchases[_datasetId][msg.sender] = Purchase({
             buyer: msg.sender,
             timestamp: block.timestamp,
             completed: false,
             disputed: false,
             escrowId: escrowId,
-            zkVerified: false,
-            accessProofHash: keccak256(_accessProof),
-            consensusStatus: 0
+            zkVerified: dataset.requiresVerification ? true : false,
+            accessProofHash: bytes32(0),
+            consensusStatus: 0,
+            zkProof: _zkProof,
+            transferStatus: transferId,
+            accessGranted: true
         });
 
-        if (msg.value > dataset.price) {
-            (bool refundSuccess, ) = msg.sender.call{
-                value: msg.value - dataset.price
-            }("");
-            require(refundSuccess, "Failed to refund excess");
+        emit DatasetPurchased(_datasetId, msg.sender, escrowId);
+    }
+
+    function getTransferProgress(
+        bytes32 _transferId
+    )
+        external
+        view
+        returns (uint256 confirmedChunks, uint256 totalChunks, bool isCompleted)
+    {
+        (
+            uint256 _confirmedChunks,
+            uint256 _totalChunks,
+            bool _isCompleted,
+
+        ) = transferProtocol.getTransferProgress(_transferId);
+        return (_confirmedChunks, _totalChunks, _isCompleted);
+    }
+
+    function confirmChunkDelivery(
+        uint256 _datasetId,
+        uint256 _chunkIndex
+    ) external nonReentrant whenNotPaused {
+        Purchase storage purchase = purchases[_datasetId][msg.sender];
+        require(!purchase.completed, "Transfer already completed");
+
+        transferProtocol.confirmChunk(purchase.transferStatus, _chunkIndex);
+
+        (, , bool completed, ) = transferProtocol.getTransferProgress(
+            purchase.transferStatus
+        );
+
+        if (completed) {
+            purchase.completed = true;
+            datasets[_datasetId].totalSales++;
+            emit TransferCompleted(purchase.transferStatus, _datasetId);
+        }
+    }
+
+    function initiateValidation(bytes32 _transferId) internal {
+        consensusManager.initiateValidation(_transferId);
+    }
+
+    function getTransferDetails(
+        bytes32 _transferId
+    )
+        external
+        view
+        returns (
+            address sender,
+            address receiver,
+            uint256 startTime,
+            bool isCompleted,
+            bytes32 deliveryProof
+        )
+    {
+        (
+            address _sender,
+            address _receiver,
+            ,
+            ,
+            uint256 _startTime,
+            ,
+            bool _isCompleted,
+            bytes32 _deliveryProof,
+            ,
+
+        ) = transferProtocol.getTransferDetails(_transferId);
+
+        return (_sender, _receiver, _startTime, _isCompleted, _deliveryProof);
+    }
+
+    function getPrivacyDetails(
+        bytes32 _txHash
+    )
+        external
+        view
+        returns (address creator, uint8 privacyLevel, bool isRevoked)
+    {
+        (creator, , privacyLevel, , isRevoked) = privacyManager
+            .getTransactionMetadata(_txHash);
+        return (creator, privacyLevel, isRevoked);
+    }
+
+    function verifyZKProof(
+        uint256 _datasetId,
+        bytes32 _proof
+    ) public returns (bool) {
+        Dataset storage dataset = datasets[_datasetId];
+        Purchase storage purchase = purchases[_datasetId][msg.sender];
+
+        if (purchase.escrowId == bytes32(0))
+            revert DataMarketErrors.DatasetNotFound(_datasetId);
+        if (purchase.zkVerified) revert DataMarketErrors.AlreadyCompleted();
+        if (!dataset.requiresVerification)
+            revert DataMarketErrors.UnauthorizedAccess(msg.sender);
+
+        bool isValid = zkVerifier.verifyZKProof(
+            _datasetId,
+            _proof,
+            dataset.zkVerificationKey
+        );
+
+        if (isValid) {
+            purchase.zkVerified = true;
+            emit ZKProofVerified(_datasetId, msg.sender, true);
         }
 
-        emit DatasetPurchased(_datasetId, msg.sender, escrowId);
+        return isValid;
+    }
+
+    function updateDatasetMetadata(
+        uint256 _datasetId,
+        string memory _newMetadataURI
+    ) external {
+        Dataset storage dataset = datasets[_datasetId];
+        if (msg.sender != dataset.seller)
+            revert DataMarketErrors.UnauthorizedAccess(msg.sender);
+        if (bytes(_newMetadataURI).length == 0)
+            revert DataMarketErrors.InvalidAmount();
+
+        dataset.metadataURI = _newMetadataURI;
+        emit MetadataUpdated(_datasetId, _newMetadataURI);
+    }
+
+    function updatePrivacyLevel(uint256 _datasetId, uint8 _newLevel) external {
+        Dataset storage dataset = datasets[_datasetId];
+        if (msg.sender != dataset.seller)
+            revert DataMarketErrors.UnauthorizedAccess(msg.sender);
+        if (_newLevel > MAX_PRIVACY_LEVEL)
+            revert DataMarketErrors.InvalidPrivacyLevel(_newLevel);
+
+        bytes32 txHash = keccak256(
+            abi.encodePacked(_datasetId, msg.sender, block.timestamp)
+        );
+        privacyManager.createPrivateTransaction(
+            txHash,
+            dataset.encryptedKey,
+            dataset.zkVerificationKey,
+            _newLevel
+        );
+
+        dataset.privacyLevel = _newLevel;
+        emit PrivacyLevelChanged(_datasetId, _newLevel);
+    }
+
+    function grantAccess(uint256 _datasetId, address _buyer) external {
+        Dataset storage dataset = datasets[_datasetId];
+        require(msg.sender == dataset.seller, "Not dataset owner");
+        require(dataset.privacyLevel > 0, "Dataset is public");
+
+        authorizedBuyers[_datasetId][_buyer] = true;
+        emit AccessGranted(_datasetId, _buyer);
+    }
+
+    function revokeAccess(uint256 _datasetId, address _buyer) external {
+        Dataset storage dataset = datasets[_datasetId];
+        require(msg.sender == dataset.seller, "Not dataset owner");
+        require(dataset.privacyLevel > 0, "Dataset is public");
+
+        authorizedBuyers[_datasetId][_buyer] = false;
+        emit AccessRevoked(_datasetId, _buyer);
+    }
+
+    function initiateTransfer(uint256 _datasetId) internal returns (bytes32) {
+        bytes32 transferId = keccak256(
+            abi.encodePacked(_datasetId, msg.sender, block.timestamp)
+        );
+
+        transfers[transferId] = Transfer({
+            transferId: transferId,
+            datasetId: _datasetId,
+            sender: datasets[_datasetId].seller,
+            receiver: msg.sender,
+            startTime: block.timestamp,
+            completedTime: 0,
+            isCompleted: false
+        });
+
+        emit TransferInitiated(transferId, _datasetId);
+        return transferId;
     }
 
     function confirmDelivery(
@@ -273,17 +568,52 @@ contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
         Purchase storage purchase = purchases[_datasetId][msg.sender];
         Dataset storage dataset = datasets[_datasetId];
 
-        require(purchase.escrowId != bytes32(0), "No escrow found");
-        require(!purchase.completed, "Already completed");
+        (, , bool consensusReached, bool approved, , ) = consensusManager
+            .getValidationDetails(purchase.escrowId);
+
+        if (!consensusReached) {
+            revert DataMarketErrors.ConsensusNotReached();
+        }
+        if (!approved) {
+            revert("Consensus rejected");
+        }
+        if (purchase.escrowId == bytes32(0))
+            revert DataMarketErrors.DatasetNotFound(_datasetId);
+        if (purchase.completed) revert DataMarketErrors.AlreadyCompleted();
+
+        if (dataset.requiresVerification && !purchase.zkVerified) {
+            revert DataMarketErrors.UnauthorizedAccess(msg.sender);
+        }
+
+        if (!transfers[purchase.transferStatus].isCompleted) {
+            revert DataMarketErrors.TransferNotCompleted(
+                purchase.transferStatus
+            );
+        }
 
         escrow.confirmDelivery(purchase.escrowId, _deliveryHash);
         escrow.releaseFunds(purchase.escrowId);
 
         purchase.completed = true;
-        purchase.consensusStatus = 1;
         dataset.totalSales++;
+    }
 
-        emit ConsensusValidated(_datasetId, purchase.escrowId, true);
+    function confirmDataTransfer(
+        uint256 _datasetId,
+        bytes32 _deliveryProof
+    ) external nonReentrant whenNotPaused {
+        Purchase storage purchase = purchases[_datasetId][msg.sender];
+        require(!purchase.completed, "Transfer already completed");
+
+        transferProtocol.confirmTransfer(
+            purchase.transferStatus,
+            _deliveryProof
+        );
+
+        purchase.completed = true;
+        datasets[_datasetId].totalSales++;
+
+        emit TransferCompleted(purchase.transferStatus, _datasetId);
     }
 
     function updateDataset(
@@ -358,5 +688,11 @@ contract DataMarketplace is ReentrancyGuard, Ownable, Pausable {
         address _user
     ) external view returns (bool) {
         return purchases[_datasetId][_user].completed;
+    }
+
+    function withdrawBalance() external onlyOwner {
+        uint256 balance = address(this).balance;
+        (bool success, ) = msg.sender.call{value: balance}("");
+        require(success, "Transfer failed");
     }
 }

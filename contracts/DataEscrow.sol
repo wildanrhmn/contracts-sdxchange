@@ -6,10 +6,28 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
-contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
-    uint256 public constant DISPUTE_PERIOD = 3 days;
-    uint256 public constant AUTO_RELEASE_PERIOD = 7 days;
+interface IDataMarketplace {
+    function isDatasetListed(
+        string memory datasetId
+    ) external view returns (bool);
 
+    function verifyDataIntegrity(
+        bytes32 deliveryHash,
+        bytes32 originalHash
+    ) external view returns (bool);
+}
+
+interface IConsensusValidator {
+    function validateTransaction(
+        bytes32 transactionId
+    ) external view returns (bool);
+
+    function getValidatorCount() external view returns (uint256);
+}
+
+contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
+    IDataMarketplace public marketplace;
+    IConsensusValidator public consensusValidator;
     struct EscrowTransaction {
         address payable buyer;
         address payable seller;
@@ -21,14 +39,28 @@ contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
         bool isDisputed;
         string datasetId;
         bytes32 deliveryHash;
-        bytes32 zkProofHash;        // Added for ZK proof reference
-        uint8 consensusStatus;      // Added for consensus tracking
-        bytes32 encryptionProof;    // Added for privacy verification
+        bytes32 zkProofHash; // Added for ZK proof reference
+        uint8 consensusStatus; // Added for consensus tracking
+        bytes32 encryptionProof; // Added for privacy verification
+        bytes32 dataHash; // Original data hash for verification
+        bytes32 privacyProof; // Privacy verification proof
+        uint8 encryptionLevel; // Level of encryption used
+        bytes encryptedMetadata; // Encrypted metadata
+        uint256 validatorCount; // Number of validators required
+        uint256 approvalCount; // Track number of approvals
+        uint256 rejectionCount; // Track number of rejections
+        mapping(address => bool) validators; // Track individual validators
     }
 
     mapping(bytes32 => EscrowTransaction) public transactions;
     mapping(address => bytes32[]) public userTransactions;
     mapping(bytes32 => address[]) public transactionValidators;
+    mapping(address => bool) public registeredValidators;
+
+    uint256 public constant DISPUTE_PERIOD = 3 days;
+    uint256 public constant AUTO_RELEASE_PERIOD = 7 days;
+    uint256 public minValidators;
+    uint256 public consensusThreshold;
     uint256 public platformFee;
 
     event EscrowCreated(
@@ -42,9 +74,15 @@ contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
     event FundsRefunded(bytes32 indexed transactionId);
     event DisputeRaised(bytes32 indexed transactionId);
     event DisputeResolved(bytes32 indexed transactionId, bool buyerRefunded);
-    event DeliveryConfirmed(bytes32 indexed transactionId, bytes32 deliveryHash);
+    event DeliveryConfirmed(
+        bytes32 indexed transactionId,
+        bytes32 deliveryHash
+    );
     event ConsensusRequired(bytes32 indexed transactionId);
-    event ValidatorAssigned(bytes32 indexed transactionId, address indexed validator);
+    event ValidatorAssigned(
+        bytes32 indexed transactionId,
+        address indexed validator
+    );
     event ProofSubmitted(bytes32 indexed transactionId, bytes32 proofHash);
     event ConsensusReached(bytes32 indexed transactionId, bool approved);
 
@@ -53,10 +91,38 @@ contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
         platformFee = _platformFee;
     }
 
+    function registerValidator(address _validator) external onlyOwner {
+        require(_validator != address(0), "Invalid validator");
+        registeredValidators[_validator] = true;
+    }
+
+    function isValidator(address _validator) public view returns (bool) {
+        return registeredValidators[_validator];
+    }
+
+    function hasConsensus(bytes32 _transactionId) public view returns (bool) {
+        EscrowTransaction storage txn = transactions[_transactionId];
+        uint256 totalVotes = txn.approvalCount + txn.rejectionCount;
+        uint256 requiredVotes = (txn.validatorCount * consensusThreshold) / 100;
+        return totalVotes >= requiredVotes;
+    }
+
+    function setMarketplace(address _marketplace) external onlyOwner {
+        require(_marketplace != address(0), "Invalid address");
+        marketplace = IDataMarketplace(_marketplace);
+    }
+
+    function setConsensusValidator(address _validator) external onlyOwner {
+        require(_validator != address(0), "Invalid address");
+        consensusValidator = IConsensusValidator(_validator);
+    }
+
     function createEscrow(
         address payable _seller,
-        string memory _datasetId
+        string memory _datasetId,
+        bytes32 _dataHash
     ) external payable nonReentrant whenNotPaused returns (bytes32) {
+        require(marketplace.isDatasetListed(_datasetId), "Dataset not listed");
         require(msg.value > 0, "Amount must be greater than 0");
         require(_seller != address(0), "Invalid seller address");
         require(_seller != msg.sender, "Cannot escrow to self");
@@ -66,27 +132,35 @@ contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
                 msg.sender,
                 _seller,
                 _datasetId,
-                block.timestamp
+                block.timestamp,
+                _dataHash
             )
         );
 
         require(transactions[transactionId].amount == 0, "Transaction exists");
 
-        transactions[transactionId] = EscrowTransaction({
-            buyer: payable(msg.sender),
-            seller: _seller,
-            amount: msg.value,
-            createdAt: block.timestamp,
-            completedAt: 0,
-            isReleased: false,
-            isRefunded: false,
-            isDisputed: false,
-            datasetId: _datasetId,
-            deliveryHash: bytes32(0),
-            zkProofHash: bytes32(0),
-            consensusStatus: 0,
-            encryptionProof: bytes32(0)
-        });
+        EscrowTransaction storage transaction = transactions[transactionId];
+
+        transaction.buyer = payable(msg.sender);
+        transaction.seller = _seller;
+        transaction.amount = msg.value;
+        transaction.createdAt = block.timestamp;
+        transaction.completedAt = 0;
+        transaction.isReleased = false;
+        transaction.isRefunded = false;
+        transaction.isDisputed = false;
+        transaction.datasetId = _datasetId;
+        transaction.deliveryHash = bytes32(0);
+        transaction.zkProofHash = bytes32(0);
+        transaction.consensusStatus = 0;
+        transaction.encryptionProof = bytes32(0);
+        transaction.dataHash = _dataHash;
+        transaction.privacyProof = bytes32(0);
+        transaction.encryptionLevel = 0;
+        transaction.encryptedMetadata = "";
+        transaction.validatorCount = consensusValidator.getValidatorCount();
+        transaction.approvalCount = 0;
+        transaction.rejectionCount = 0;
 
         userTransactions[msg.sender].push(transactionId);
         userTransactions[_seller].push(transactionId);
@@ -110,10 +184,18 @@ contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
         require(msg.sender == transaction.buyer, "Only buyer can confirm");
         require(!transaction.isReleased, "Already released");
         require(!transaction.isRefunded, "Already refunded");
-        
+
+        require(
+            marketplace.verifyDataIntegrity(
+                _deliveryHash,
+                transaction.dataHash
+            ),
+            "Data integrity check failed"
+        );
+
         transaction.deliveryHash = _deliveryHash;
         transaction.completedAt = block.timestamp;
-        
+
         emit DeliveryConfirmed(_transactionId, _deliveryHash);
     }
 
@@ -122,9 +204,9 @@ contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
     ) external nonReentrant whenNotPaused {
         EscrowTransaction storage transaction = transactions[_transactionId];
         require(
-            msg.sender == transaction.buyer || 
-            msg.sender == owner() ||
-            block.timestamp >= transaction.createdAt + AUTO_RELEASE_PERIOD,
+            msg.sender == transaction.buyer ||
+                msg.sender == owner() ||
+                block.timestamp >= transaction.createdAt + AUTO_RELEASE_PERIOD,
             "Not authorized"
         );
         require(!transaction.isReleased, "Already released");
@@ -154,7 +236,7 @@ contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
         EscrowTransaction storage transaction = transactions[_transactionId];
         require(msg.sender == transaction.buyer, "Only buyer can submit");
         require(!transaction.isReleased, "Already released");
-        
+
         transaction.zkProofHash = _proofHash;
         emit ProofSubmitted(_transactionId, _proofHash);
     }
@@ -166,12 +248,21 @@ contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
         EscrowTransaction storage transaction = transactions[_transactionId];
         require(isValidator(msg.sender), "Not a validator");
         require(!transaction.isReleased, "Already released");
+        require(!transaction.validators[msg.sender], "Already validated");
 
-        transactionValidators[_transactionId].push(msg.sender);
-        
+        transaction.validators[msg.sender] = true;
+
+        if (_approved) {
+            transaction.approvalCount++;
+        } else {
+            transaction.rejectionCount++;
+        }
+
         if (hasConsensus(_transactionId)) {
-            transaction.consensusStatus = _approved ? 1 : 2;
-            emit ConsensusReached(_transactionId, _approved);
+            bool consensusApproved = transaction.approvalCount >
+                transaction.rejectionCount;
+            transaction.consensusStatus = consensusApproved ? 1 : 2;
+            emit ConsensusReached(_transactionId, consensusApproved);
         }
     }
 
@@ -202,12 +293,16 @@ contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
 
         if (_refundBuyer) {
             transaction.isRefunded = true;
-            (bool success, ) = transaction.buyer.call{value: transaction.amount}("");
+            (bool success, ) = transaction.buyer.call{
+                value: transaction.amount
+            }("");
             require(success, "Refund failed");
             emit FundsRefunded(_transactionId);
         } else {
             transaction.isReleased = true;
-            (bool success, ) = transaction.seller.call{value: transaction.amount}("");
+            (bool success, ) = transaction.seller.call{
+                value: transaction.amount
+            }("");
             require(success, "Release failed");
             emit FundsReleased(_transactionId);
         }
@@ -238,13 +333,5 @@ contract DataEscrow is ReentrancyGuard, Ownable, Pausable {
         uint256 balance = _token.balanceOf(address(this));
         require(balance > 0, "No tokens to withdraw");
         require(_token.transfer(owner(), balance), "Transfer failed");
-    }
-
-    function isValidator(address _validator) internal pure returns (bool) {
-        return true;
-    }
-
-    function hasConsensus(bytes32 _transactionId) internal view returns (bool) {
-        return transactionValidators[_transactionId].length >= 3;
     }
 }
