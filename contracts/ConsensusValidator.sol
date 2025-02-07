@@ -4,8 +4,9 @@ pragma solidity ^0.8.28;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "../lib/DataMarketErrors.sol";
+import "../lib/DataMarketInterface.sol";
 
-contract ConsensusValidator is Ownable, Pausable {
+contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
     using DataMarketErrors for *;
 
     struct ValidationResult {
@@ -38,15 +39,87 @@ contract ConsensusValidator is Ownable, Pausable {
     event ValidatorAdded(address indexed validator);
     event ValidatorRemoved(address indexed validator);
     event ConsensusReached(bytes32 indexed transferId, bool approved);
-    event ValidationSubmitted(
-        bytes32 indexed transferId,
-        address indexed validator,
-        bool approved
-    );
+    event ValidationSubmitted(bytes32 indexed transferId, address indexed validator, bool approved);
     event StakeWithdrawn(address indexed validator, uint256 amount);
     event ValidationCleaned(bytes32 indexed transferId);
 
     constructor() Ownable(msg.sender) {}
+
+    function hasValidConsensus(bytes32 _transferId) external view override returns (bool) {
+        ValidationResult storage validation = validations[_transferId];
+        return validation.consensusReached;
+    }
+
+    function getValidatorCount() external view override returns (uint256) {
+        return validatorCount;
+    }
+
+    function getValidationDetails(
+        bytes32 _transferId
+    )
+        external
+        view
+        override
+        returns (
+            uint256 approvalCount,
+            uint256 rejectionCount,
+            bool consensusReached,
+            bool approved,
+            uint256 validationStartTime,
+            uint256 totalValidatorCount
+        )
+    {
+        ValidationResult storage validation = validations[_transferId];
+        return (
+            validation.approvalCount,
+            validation.rejectionCount,
+            validation.consensusReached,
+            validation.approved,
+            validation.startTime,
+            validation.validatorCount
+        );
+    }
+
+    function initiateValidation(bytes32 _transferId) external override {
+        if (validatorCount < minValidators)
+            revert DataMarketErrors.InsufficientValidators();
+        ValidationResult storage validation = validations[_transferId];
+
+        if (validation.startTime != 0)
+            revert DataMarketErrors.AlreadyInitialized();
+        validation.startTime = block.timestamp;
+        validation.validatorCount = validatorCount;
+    }
+
+    function validate(
+        bytes32 _transferId,
+        bool _approved
+    ) external override whenNotPaused {
+        if (!validators[msg.sender]) revert DataMarketErrors.NotValidator();
+
+        ValidationResult storage validation = validations[_transferId];
+
+        if (validation.hasValidated[msg.sender])
+            revert DataMarketErrors.AlreadyValidated();
+        if (validation.startTime == 0)
+            revert DataMarketErrors.TransferNotFound();
+        if (block.timestamp > validation.startTime + VALIDATION_PERIOD)
+            revert DataMarketErrors.ValidationPeriodEnded();
+        if (validation.consensusReached)
+            revert DataMarketErrors.ConsensusAlreadyReached();
+
+        validation.hasValidated[msg.sender] = true;
+
+        if (_approved) {
+            validation.approvalCount++;
+        } else {
+            validation.rejectionCount++;
+        }
+
+        emit ValidationSubmitted(_transferId, msg.sender, _approved);
+
+        checkConsensus(_transferId);
+    }
 
     function addValidator(address _validator) external payable onlyOwner {
         if (_validator == address(0)) revert DataMarketErrors.NotValidator();
@@ -81,47 +154,6 @@ contract ConsensusValidator is Ownable, Pausable {
         emit ValidatorRemoved(_validator);
     }
 
-    function initiateValidation(bytes32 _transferId) external {
-        if (validatorCount < minValidators)
-            revert DataMarketErrors.InsufficientValidators();
-        ValidationResult storage validation = validations[_transferId];
-
-        if (validation.startTime != 0)
-            revert DataMarketErrors.AlreadyInitialized();
-        validation.startTime = block.timestamp;
-        validation.validatorCount = validatorCount;
-    }
-
-    function validate(
-        bytes32 _transferId,
-        bool _approved
-    ) external whenNotPaused {
-        if (!validators[msg.sender]) revert DataMarketErrors.NotValidator();
-
-        ValidationResult storage validation = validations[_transferId];
-
-        if (validation.hasValidated[msg.sender])
-            revert DataMarketErrors.AlreadyValidated();
-        if (validation.startTime == 0)
-            revert DataMarketErrors.TransferNotFound();
-        if (validation.consensusReached)
-            revert DataMarketErrors.ConsensusAlreadyReached();
-        if (block.timestamp > validation.startTime + VALIDATION_PERIOD)
-            revert DataMarketErrors.ValidationPeriodEnded();
-
-        validation.hasValidated[msg.sender] = true;
-
-        if (_approved) {
-            validation.approvalCount++;
-        } else {
-            validation.rejectionCount++;
-        }
-
-        emit ValidationSubmitted(_transferId, msg.sender, _approved);
-
-        checkConsensus(_transferId);
-    }
-
     function checkConsensus(bytes32 _transferId) internal {
         ValidationResult storage validation = validations[_transferId];
         uint256 totalVotes = validation.approvalCount +
@@ -148,31 +180,6 @@ contract ConsensusValidator is Ownable, Pausable {
 
     function setMinValidators(uint256 _minValidators) external onlyOwner {
         minValidators = _minValidators;
-    }
-
-    function getValidationDetails(
-        bytes32 _transferId
-    )
-        external
-        view
-        returns (
-            uint256 approvalCount,
-            uint256 rejectionCount,
-            bool consensusReached,
-            bool approved,
-            uint256 validationStartTime,
-            uint256 totalValidatorCount
-        )
-    {
-        ValidationResult storage validation = validations[_transferId];
-        return (
-            validation.approvalCount,
-            validation.rejectionCount,
-            validation.consensusReached,
-            validation.approved,
-            validation.startTime,
-            validation.validatorCount
-        );
     }
 
     function hasValidated(

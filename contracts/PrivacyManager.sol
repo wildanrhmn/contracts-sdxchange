@@ -4,9 +4,10 @@ pragma solidity ^0.8.28;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "../lib/DataMarketInterface.sol";
 import "../lib/DataMarketErrors.sol";
 
-contract PrivacyManager is Ownable, Pausable, ReentrancyGuard {
+contract PrivacyManager is IPrivacyManager, Ownable, Pausable, ReentrancyGuard {
     using DataMarketErrors for *;
 
     enum PrivacyLevel {
@@ -41,11 +42,7 @@ contract PrivacyManager is Ownable, Pausable, ReentrancyGuard {
     uint256 public constant MAX_METADATA_SIZE = 1024;
     uint256 public constant CLEANUP_DELAY = 30 days;
 
-    event TransactionCreated(
-        bytes32 indexed txHash,
-        address indexed creator,
-        uint8 privacyLevel
-    );
+    event TransactionCreated(bytes32 indexed txHash, address indexed creator, uint8 privacyLevel);
     event AccessGranted(bytes32 indexed txHash, address indexed user);
     event AccessRevoked(bytes32 indexed txHash, address indexed user);
     event MetadataUpdated(bytes32 indexed txHash, bytes newEncryptedMetadata);
@@ -54,18 +51,12 @@ contract PrivacyManager is Ownable, Pausable, ReentrancyGuard {
 
     constructor() Ownable(msg.sender) {}
 
-    function isValidPrivacyLevel(uint8 _level) internal pure returns (bool) {
-        return _level <= uint8(PrivacyLevel.StrictlyPrivate);
-    }
-
     function createPrivateTransaction(
         bytes32 _txHash,
         bytes memory _encryptedMetadata,
         bytes32 _zkProof,
         uint8 _privacyLevel
-    ) external nonReentrant whenNotPaused {
-        if (!isValidPrivacyLevel(_privacyLevel))
-            revert DataMarketErrors.InvalidPrivacyLevel(_privacyLevel);
+    ) external override nonReentrant whenNotPaused {
         if (_privacyLevel == uint8(PrivacyLevel.StrictlyPrivate)) {
             require(
                 _zkProof != bytes32(0) &&
@@ -91,6 +82,28 @@ contract PrivacyManager is Ownable, Pausable, ReentrancyGuard {
         userTransactions[msg.sender].push(_txHash);
 
         emit TransactionCreated(_txHash, msg.sender, _privacyLevel);
+    }
+
+    function getTransactionMetadata(
+        bytes32 _txHash
+    ) external view override returns (
+        address creator,
+        bytes memory encryptedMetadata,
+        uint8 privacyLevel,
+        uint256 timestamp,
+        bool isRevoked
+    ) {
+        PrivateTransaction storage txn = privateTransactions[_txHash];
+        if (!txn.authorizedUsers[msg.sender])
+            revert DataMarketErrors.UnauthorizedAccess(msg.sender);
+            
+        return (
+            txn.creator,
+            txn.encryptedMetadata,
+            txn.privacyLevel,
+            txn.timestamp,
+            txn.isRevoked
+        );
     }
 
     function grantAccess(
@@ -202,31 +215,6 @@ contract PrivacyManager is Ownable, Pausable, ReentrancyGuard {
         address _user
     ) external view returns (bytes32[] memory) {
         return userTransactions[_user];
-    }
-
-    function getTransactionMetadata(
-        bytes32 _txHash
-    )
-        external
-        view
-        returns (
-            address creator,
-            bytes memory encryptedMetadata,
-            uint8 privacyLevel,
-            uint256 timestamp,
-            bool isRevoked
-        )
-    {
-        PrivateTransaction storage txn = privateTransactions[_txHash];
-        if (!txn.authorizedUsers[msg.sender])
-            revert DataMarketErrors.UnauthorizedAccess(msg.sender);
-        return (
-            txn.creator,
-            txn.encryptedMetadata,
-            txn.privacyLevel,
-            txn.timestamp,
-            txn.isRevoked
-        );
     }
 
     function _addHistoryEntry(

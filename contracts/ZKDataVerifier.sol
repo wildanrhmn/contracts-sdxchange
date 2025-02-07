@@ -4,9 +4,10 @@ pragma solidity ^0.8.28;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "../lib/DataMarketInterface.sol";
 import "../lib/DataMarketErrors.sol";
 
-contract ZKDataVerifier is Ownable, Pausable, ReentrancyGuard {
+contract ZKDataVerifier is IZKDataVerifier, Ownable, Pausable, ReentrancyGuard {
     using DataMarketErrors for *;
 
     struct VerificationResult {
@@ -55,29 +56,68 @@ contract ZKDataVerifier is Ownable, Pausable, ReentrancyGuard {
     uint256 public constant MIN_FORMAT_SCORE = 80;
 
     event ProofVerified(uint256 indexed datasetId, bytes32 proof, bool success);
-    event DatasetVerified(
-        uint256 indexed datasetId,
-        bool success,
-        string failureReason
-    );
-    event VerificationResultUpdated(
-        uint256 indexed datasetId,
-        uint256 completenessScore,
-        uint256 formatScore
-    );
+    event DatasetVerified(uint256 indexed datasetId, bool success, string failureReason);
+    event VerificationResultUpdated(uint256 indexed datasetId, uint256 completenessScore, uint256 formatScore);
 
     constructor() Ownable(msg.sender) {}
+
+    function verifyDataset(
+        uint256 _datasetId,
+        string memory _dataType,
+        uint256 _size,
+        bool _hasSample,
+        uint256 _sampleSize,
+        bytes memory _formatProof
+    ) external override nonReentrant whenNotPaused returns (bool) {
+        if (_size == 0) revert DataMarketErrors.InvalidProof();
+        if (_hasSample && _sampleSize < MIN_SAMPLE_SIZE)
+            revert DataMarketErrors.InvalidProof();
+
+        datasetsMetadata[_datasetId] = DatasetMetadata({
+            dataType: _dataType,
+            size: _size,
+            hasSample: _hasSample,
+            sampleSize: _sampleSize,
+            formatProof: _formatProof,
+            lastVerification: block.timestamp,
+            isVerified: false
+        });
+
+        (
+            bool success,
+            string memory failureReason,
+            uint256 completenessScore,
+            uint256 formatScore
+        ) = verifyDatasetLogic(_datasetId);
+
+        verificationResults[_datasetId] = VerificationResult({
+            isVerified: success,
+            completenessScore: completenessScore,
+            formatScore: formatScore,
+            failureReason: failureReason,
+            timestamp: block.timestamp
+        });
+
+        datasetsMetadata[_datasetId].isVerified = success;
+
+        emit DatasetVerified(_datasetId, success, failureReason);
+        emit VerificationResultUpdated(
+            _datasetId,
+            completenessScore,
+            formatScore
+        );
+
+        return success;
+    }
 
     function verifyZKProof(
         uint256 _datasetId,
         bytes32 _proof,
         bytes32 _publicInputs
-    ) external nonReentrant whenNotPaused returns (bool) {
+    ) external override nonReentrant whenNotPaused returns (bool) {
         if (_proof == bytes32(0)) revert DataMarketErrors.InvalidProof();
         if (usedProofs[_proof]) revert DataMarketErrors.ProofAlreadyVerified();
 
-        // This is where you would implement the actual ZK proof verification
-        // For now, we'll simulate the verification process
         bool isValid = verifyProofLogic(_proof, _publicInputs);
 
         if (isValid) {
@@ -97,91 +137,6 @@ contract ZKDataVerifier is Ownable, Pausable, ReentrancyGuard {
         }
 
         return isValid;
-    }
-
-    function verifyDataset(
-        uint256 _datasetId,
-        string calldata _dataType,
-        uint256 _size,
-        bool _hasSample,
-        uint256 _sampleSize,
-        bytes calldata _formatProof
-    ) public nonReentrant whenNotPaused returns (bool) {
-        if (_size == 0) revert DataMarketErrors.InvalidProof();
-        if (_hasSample && _sampleSize < MIN_SAMPLE_SIZE)
-            revert DataMarketErrors.InvalidProof();
-
-        // Store dataset metadata
-        datasetsMetadata[_datasetId] = DatasetMetadata({
-            dataType: _dataType,
-            size: _size,
-            hasSample: _hasSample,
-            sampleSize: _sampleSize,
-            formatProof: _formatProof,
-            lastVerification: block.timestamp,
-            isVerified: false
-        });
-
-        (
-            bool success,
-            string memory failureReason,
-            uint256 completenessScore,
-            uint256 formatScore
-        ) = verifyDatasetLogic(_datasetId);
-
-        VerificationResult memory result = VerificationResult({
-            isVerified: success,
-            completenessScore: completenessScore,
-            formatScore: formatScore,
-            failureReason: failureReason,
-            timestamp: block.timestamp
-        });
-
-        verificationResults[_datasetId] = result;
-        datasetsMetadata[_datasetId].isVerified = success;
-
-        verificationHistory[_datasetId].push(
-            VerificationHistory({
-                timestamp: block.timestamp,
-                success: success,
-                reason: failureReason,
-                verifier: msg.sender
-            })
-        );
-
-        emit DatasetVerified(_datasetId, success, failureReason);
-        emit VerificationResultUpdated(
-            _datasetId,
-            completenessScore,
-            formatScore
-        );
-
-        return success;
-    }
-
-    function verifyMultipleDatasets(
-        uint256[] calldata _datasetIds,
-        string[] calldata _dataTypes,
-        uint256[] calldata _sizes,
-        bool[] calldata _hasSamples,
-        uint256[] calldata _sampleSizes,
-        bytes[] calldata _formatProofs
-    ) external nonReentrant whenNotPaused returns (bool[] memory results) {
-        if (_datasetIds.length != _dataTypes.length)
-            revert DataMarketErrors.InvalidInput();
-
-        results = new bool[](_datasetIds.length);
-        for (uint256 i = 0; i < _datasetIds.length; i++) {
-            results[i] = verifyDataset(
-                _datasetIds[i],
-                _dataTypes[i],
-                _sizes[i],
-                _hasSamples[i],
-                _sampleSizes[i],
-                _formatProofs[i]
-            );
-        }
-        return results;
     }
 
     function getVerificationResult(

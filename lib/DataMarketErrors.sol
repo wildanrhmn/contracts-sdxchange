@@ -47,4 +47,21 @@ library DataMarketErrors {
     error InsufficientStake();
     error StakeNotWithdrawn();
     error NoStakeFound();
+
+    // Add new errors needed for DataEscrow
+    error InvalidValidator();
+    error InvalidMarketplace();
+    error InvalidConsensusValidator();
+    error EscrowAlreadyExists();
+    error EscrowNotFound();
+    error FundsAlreadyReleased();
+    error FundsAlreadyRefunded();
+    error DisputeAlreadyRaised();
+    error NoDisputeExists();
+    error DisputePeriodExpired();
+    error AutoReleasePeriodNotEnded();
+    error InvalidFee();
+    error NoTokensToWithdraw();
+    error TransferFailed();
+    error FeeTransferFailed();
 }
