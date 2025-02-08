@@ -34,6 +34,8 @@ library DataMarketErrors {
     error ZKVerificationRequired();
     error InvalidDataHash();
     error NotAuthorizedForPrivateDataset();
+    error NotRegistered();
+    error NotSeller();
 
     // Add new errors needed for ZKDataVerifier
     error InvalidProof();

@@ -10,6 +10,7 @@ import "./P2PDataTransfer.sol";
 import "./ConsensusValidator.sol";
 import "./PrivacyManager.sol";
 import "./ZKDataVerifier.sol";
+import "./UserManager.sol";
 import "../lib/DataMarketErrors.sol";
 import "../lib/DataMarketInterface.sol";
 
@@ -27,6 +28,7 @@ contract DataMarketplace is
     uint256 public constant DISPUTE_PERIOD = 3 days;
     uint256 public constant EMERGENCY_PERIOD = 7 days;
 
+    UserManager public userManager;
     IDataEscrow public escrow;
     IP2PDataTransfer public transferProtocol;
     IConsensusValidator public consensusManager;
@@ -116,9 +118,11 @@ contract DataMarketplace is
         address _transferAddress,
         address _consensusAddress,
         address _privacyAddress,
-        address _zkVerifierAddress
+        address _zkVerifierAddress,
+        address _userManagerAddress
     ) Ownable(msg.sender) {
         platformFee = _platformFee;
+        userManager = UserManager(_userManagerAddress);
         escrow = IDataEscrow(_escrowAddress);
         transferProtocol = IP2PDataTransfer(_transferAddress);
         consensusManager = IConsensusValidator(_consensusAddress);
@@ -282,6 +286,8 @@ contract DataMarketplace is
         PrivacyLevel _privacyLevel,
         bytes memory _encryptedMetadata
     ) external whenNotPaused returns (uint256) {
+        if (!userManager.checkIsRegistered(msg.sender)) revert DataMarketErrors.NotRegistered();
+        if (!userManager.checkIsSeller(msg.sender)) revert DataMarketErrors.NotSeller();
         if (bytes(_metadataURI).length == 0) revert DataMarketErrors.InvalidMetadataURI();
         if (bytes(_sampleDataURI).length == 0) revert DataMarketErrors.InvalidSampleDataURI();
         if (_price == 0) revert DataMarketErrors.InvalidPrice();
@@ -343,6 +349,7 @@ contract DataMarketplace is
         uint256 _datasetId,
         bytes32 _zkProof
     ) external payable nonReentrant whenNotPaused {
+        if (!userManager.checkIsRegistered(msg.sender)) revert DataMarketErrors.NotRegistered();
         Dataset storage dataset = datasets[_datasetId];
         if (!dataset.isActive) revert DataMarketErrors.DatasetNotAvailable();
         if (msg.value < dataset.price) revert DataMarketErrors.InsufficientPayment();

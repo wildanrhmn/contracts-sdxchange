@@ -5,12 +5,14 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "./UserManager.sol";
 import "../lib/DataMarketInterface.sol";
 import "../lib/DataMarketErrors.sol";
 
 contract DataEscrow is IDataEscrow, ReentrancyGuard, Ownable, Pausable {
     using DataMarketErrors for *;
 
+    UserManager public userManager;
     IDataMarketplace public marketplace;
     IConsensusValidator public consensusValidator;
     struct EscrowTransaction {
@@ -59,16 +61,20 @@ contract DataEscrow is IDataEscrow, ReentrancyGuard, Ownable, Pausable {
     event ProofSubmitted(bytes32 indexed transactionId, bytes32 proofHash);
     event ConsensusReached(bytes32 indexed transactionId, bool approved);
 
-    constructor(uint256 _platformFee) Ownable(msg.sender) {
+    constructor(uint256 _platformFee, address _userManagerAddress) Ownable(msg.sender) {
         if (_platformFee > 1000) revert DataMarketErrors.InvalidFee();
         platformFee = _platformFee;
+        userManager = UserManager(_userManagerAddress);
     }
+
 
     function createEscrow(
         address payable _seller,
         string memory _datasetId,
         bytes32 _dataHash
     ) external payable override nonReentrant whenNotPaused returns (bytes32) {
+        if (!userManager.checkIsRegistered(msg.sender)) revert DataMarketErrors.NotRegistered();
+        if (!userManager.checkIsSeller(_seller)) revert DataMarketErrors.NotSeller();
         if (!marketplace.isDatasetListed(_datasetId)) revert DataMarketErrors.DatasetNotFound(0);
         if (msg.value == 0) revert DataMarketErrors.InvalidAmount();
         if (_seller == address(0)) revert DataMarketErrors.InvalidAddress();

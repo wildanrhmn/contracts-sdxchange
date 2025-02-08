@@ -9,6 +9,15 @@ import "../lib/DataMarketInterface.sol";
 contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
     using DataMarketErrors for *;
 
+    struct Validator {
+        bool isRegistered;
+        uint256 stakedAmount;
+        uint256 registrationDate;
+        uint256 validationsCount;
+        uint256 successfulValidations;
+        bool isActive;
+    }
+
     struct ValidationResult {
         bool consensusReached;
         bool approved;
@@ -18,23 +27,19 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
         uint256 endTime;
         uint256 validatorCount;
         mapping(address => bool) hasValidated;
-    }
-
-    struct ValidatorStats {
-        uint256 totalParticipation;
-        uint256 correctValidations;
+        mapping(address => bool) validatorVotes;
     }
 
     uint256 public validatorCount;
-    uint256 public constant VALIDATION_PERIOD = 24 hours;
     uint256 public minValidators = 3;
+    uint256 public constant VALIDATION_PERIOD = 24 hours;
     uint256 public constant CLEANUP_DELAY = 7 days;
     uint256 public constant MINIMUM_STAKE = 0.0001 ether;
+    uint256 private currentValidatorIndex;
 
+    mapping(uint256 => address) private validatorAddresses;
     mapping(bytes32 => ValidationResult) public validations;
-    mapping(address => bool) public validators;
-    mapping(address => uint256) public validatorStake;
-    mapping(address => ValidatorStats) public validatorStats;
+    mapping(address => Validator) public validators;
 
     event ValidatorAdded(address indexed validator);
     event ValidatorRemoved(address indexed validator);
@@ -42,16 +47,66 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
     event ValidationSubmitted(bytes32 indexed transferId, address indexed validator, bool approved);
     event StakeWithdrawn(address indexed validator, uint256 amount);
     event ValidationCleaned(bytes32 indexed transferId);
+    event ValidatorRegistered(address indexed validator, uint256 stake);
+    event ValidatorStakeIncreased(address indexed validator, uint256 newStake);
+    event ValidatorDeactivated(address indexed validator);
 
     constructor() Ownable(msg.sender) {}
 
-    function hasValidConsensus(bytes32 _transferId) external view override returns (bool) {
-        ValidationResult storage validation = validations[_transferId];
-        return validation.consensusReached;
+    function registerAsValidator() external payable whenNotPaused {
+        require(msg.value >= MINIMUM_STAKE, "Insufficient stake");
+        require(!validators[msg.sender].isRegistered, "Already registered");
+
+        validators[msg.sender] = Validator({
+            isRegistered: true,
+            stakedAmount: msg.value,
+            registrationDate: block.timestamp,
+            validationsCount: 0,
+            successfulValidations: 0,
+            isActive: true
+        });
+
+        validatorAddresses[currentValidatorIndex] = msg.sender;
+        currentValidatorIndex++;
+        validatorCount++;
+        
+        emit ValidatorRegistered(msg.sender, msg.value);
     }
 
-    function getValidatorCount() external view override returns (uint256) {
-        return validatorCount;
+    function increaseStake() external payable whenNotPaused {
+        Validator storage validator = validators[msg.sender];
+        require(validator.isRegistered, "Not a validator");
+        require(validator.isActive, "Validator not active");
+
+        validator.stakedAmount += msg.value;
+        emit ValidatorStakeIncreased(msg.sender, validator.stakedAmount);
+    }
+
+    function withdrawStake() external whenNotPaused {
+        Validator storage validator = validators[msg.sender];
+        require(validator.isRegistered, "Not a validator");
+        require(validator.isActive, "Validator not active");
+        require(block.timestamp >= validator.registrationDate + 30 days, "Withdrawal locked");
+
+        uint256 stakeToReturn = validator.stakedAmount;
+        validator.stakedAmount = 0;
+        validator.isActive = false;
+        validatorCount--;
+
+        payable(msg.sender).transfer(stakeToReturn);
+        emit ValidatorDeactivated(msg.sender);
+    }
+
+    function removeValidator(address _validator) external onlyOwner {
+        Validator storage validator = validators[_validator];
+        require(validator.isRegistered, "Not a validator");
+        require(validatorCount > minValidators, "Too few validators");
+        require(validator.stakedAmount == 0, "Stake not withdrawn");
+
+        validator.isRegistered = false;
+        validator.isActive = false;
+        validatorCount--;
+        emit ValidatorRemoved(_validator);
     }
 
     function getValidationDetails(
@@ -80,6 +135,30 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
         );
     }
 
+    function getValidatorAtIndex(uint256 _index) public view returns (address) {
+        require(_index < currentValidatorIndex, "Index out of bounds");
+        return validatorAddresses[_index];
+    }
+
+    function getAllActiveValidators() external view returns (address[] memory) {
+        address[] memory activeValidators = new address[](validatorCount);
+        uint256 activeCount = 0;
+        
+        for(uint256 i = 0; i < currentValidatorIndex; i++) {
+            address validatorAddr = validatorAddresses[i];
+            if(validators[validatorAddr].isActive) {
+                activeValidators[activeCount] = validatorAddr;
+                activeCount++;
+            }
+        }
+        
+        assembly {
+            mstore(activeValidators, activeCount)
+        }
+        
+        return activeValidators;
+    }
+
     function initiateValidation(bytes32 _transferId) external override {
         if (validatorCount < minValidators)
             revert DataMarketErrors.InsufficientValidators();
@@ -91,24 +170,18 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
         validation.validatorCount = validatorCount;
     }
 
-    function validate(
-        bytes32 _transferId,
-        bool _approved
-    ) external override whenNotPaused {
-        if (!validators[msg.sender]) revert DataMarketErrors.NotValidator();
+    function validate(bytes32 _transferId, bool _approved) external override whenNotPaused {
+        Validator storage validator = validators[msg.sender];
+        require(validator.isRegistered && validator.isActive, "Not an active validator");
 
         ValidationResult storage validation = validations[_transferId];
-
-        if (validation.hasValidated[msg.sender])
-            revert DataMarketErrors.AlreadyValidated();
-        if (validation.startTime == 0)
-            revert DataMarketErrors.TransferNotFound();
-        if (block.timestamp > validation.startTime + VALIDATION_PERIOD)
-            revert DataMarketErrors.ValidationPeriodEnded();
-        if (validation.consensusReached)
-            revert DataMarketErrors.ConsensusAlreadyReached();
+        require(!validation.hasValidated[msg.sender], "Already validated");
+        require(validation.startTime != 0, "Validation not initiated");
+        require(block.timestamp <= validation.startTime + VALIDATION_PERIOD, "Period ended");
+        require(!validation.consensusReached, "Consensus reached");
 
         validation.hasValidated[msg.sender] = true;
+        validation.validatorVotes[msg.sender] = _approved;
 
         if (_approved) {
             validation.approvalCount++;
@@ -116,48 +189,15 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
             validation.rejectionCount++;
         }
 
+        validator.validationsCount++;
         emit ValidationSubmitted(_transferId, msg.sender, _approved);
 
         checkConsensus(_transferId);
     }
 
-    function addValidator(address _validator) external payable onlyOwner {
-        if (_validator == address(0)) revert DataMarketErrors.NotValidator();
-        if (validators[_validator]) revert DataMarketErrors.AlreadyValidated();
-        if (msg.value < MINIMUM_STAKE)
-            revert DataMarketErrors.InsufficientStake();
-
-        validators[_validator] = true;
-        validatorStake[_validator] = msg.value;
-        validatorCount++;
-        emit ValidatorAdded(_validator);
-    }
-
-    function withdrawStake() external {
-        if (!validators[msg.sender]) revert DataMarketErrors.NotValidator();
-        uint256 stake = validatorStake[msg.sender];
-        validatorStake[msg.sender] = 0;
-        payable(msg.sender).transfer(stake);
-        emit StakeWithdrawn(msg.sender, stake);
-    }
-
-    function removeValidator(address _validator) external onlyOwner {
-        if (!validators[_validator]) revert DataMarketErrors.NotValidator();
-        if (validatorCount <= minValidators)
-            revert DataMarketErrors.InsufficientValidators();
-
-        if (validatorStake[_validator] > 0)
-            revert DataMarketErrors.StakeNotWithdrawn();
-
-        validators[_validator] = false;
-        validatorCount--;
-        emit ValidatorRemoved(_validator);
-    }
-
     function checkConsensus(bytes32 _transferId) internal {
         ValidationResult storage validation = validations[_transferId];
-        uint256 totalVotes = validation.approvalCount +
-            validation.rejectionCount;
+        uint256 totalVotes = validation.approvalCount + validation.rejectionCount;
 
         if (totalVotes < validation.validatorCount / 2) {
             return;
@@ -165,17 +205,28 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
 
         uint256 threshold = (validation.validatorCount * 2) / 3;
 
-        if (validation.approvalCount > threshold) {
+        if (validation.approvalCount > threshold || validation.rejectionCount > threshold) {
             validation.consensusReached = true;
-            validation.approved = true;
+            validation.approved = validation.approvalCount > validation.rejectionCount;
             validation.endTime = block.timestamp;
-            emit ConsensusReached(_transferId, true);
-        } else if (validation.rejectionCount > threshold) {
-            validation.consensusReached = true;
-            validation.approved = false;
-            validation.endTime = block.timestamp;
-            emit ConsensusReached(_transferId, false);
+
+            for (uint i = 0; i < validatorCount; i++) {
+                address validatorAddress = getValidatorAtIndex(i);
+                if (validation.hasValidated[validatorAddress]) {
+                    Validator storage validator = validators[validatorAddress];
+                    if (validation.validatorVotes[validatorAddress] == validation.approved) {
+                        validator.successfulValidations++;
+                    }
+                }
+            }
+
+            emit ConsensusReached(_transferId, validation.approved);
         }
+    }
+
+    function hasValidConsensus(bytes32 _transferId) external view override returns (bool) {
+        ValidationResult storage validation = validations[_transferId];
+        return validation.consensusReached;
     }
 
     function setMinValidators(uint256 _minValidators) external onlyOwner {
@@ -200,23 +251,19 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
     }
 
     function emergencyWithdraw(address _validator) external onlyOwner {
-        if (!validators[_validator]) revert DataMarketErrors.NotValidator();
-        uint256 stake = validatorStake[_validator];
-        if (stake == 0) revert DataMarketErrors.NoStakeFound();
+        Validator storage validator = validators[_validator];
+        require(validator.isRegistered, "Not a validator");
+        require(validator.stakedAmount > 0, "No stake found");
 
-        validatorStake[_validator] = 0;
-        payable(_validator).transfer(stake);
+        uint256 stakeToReturn = validator.stakedAmount;
+        validator.stakedAmount = 0;
+        validator.isActive = false;
+        
+        payable(_validator).transfer(stakeToReturn);
     }
 
-    function updateValidatorStats(
-        address _validator,
-        bool _matchedConsensus
-    ) internal {
-        ValidatorStats storage stats = validatorStats[_validator];
-        stats.totalParticipation++;
-        if (_matchedConsensus) {
-            stats.correctValidations++;
-        }
+    function getValidatorCount() external view override returns (uint256) {
+        return validatorCount;
     }
 
     function pause() external onlyOwner {

@@ -4,11 +4,14 @@ pragma solidity ^0.8.28;
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
+import "./UserManager.sol";
 import "../lib/DataMarketInterface.sol";
 import "../lib/DataMarketErrors.sol";
 
 contract P2PDataTransfer is IP2PDataTransfer, ReentrancyGuard, Ownable, Pausable {
     using DataMarketErrors for *;
+
+    UserManager public userManager;
 
     struct Transfer {
         bytes32 transferId;
@@ -16,6 +19,7 @@ contract P2PDataTransfer is IP2PDataTransfer, ReentrancyGuard, Ownable, Pausable
         bytes32 deliveryProof;
         address sender;
         address receiver;
+
         uint256 startTime;
         uint256 completedTime;
         uint256 chunkSize;
@@ -38,7 +42,9 @@ contract P2PDataTransfer is IP2PDataTransfer, ReentrancyGuard, Ownable, Pausable
     event TransferCancelled(bytes32 indexed transferId, string reason);
     event TransferCleaned(bytes32 indexed transferId, uint256 timestamp);
 
-    constructor() Ownable(msg.sender) {}
+    constructor(address _userManagerAddress) Ownable(msg.sender) {
+        userManager = UserManager(_userManagerAddress);
+    }
 
     function getTransferDetails(
         bytes32 _transferId
@@ -75,6 +81,7 @@ contract P2PDataTransfer is IP2PDataTransfer, ReentrancyGuard, Ownable, Pausable
         bytes memory _encryptedKey,
         uint256 _totalSize
     ) external override nonReentrant whenNotPaused returns (bytes32) {
+        if (!userManager.checkIsRegistered(msg.sender)) revert DataMarketErrors.NotRegistered();
         if (_encryptedKey.length > MAX_ENCRYPTED_KEY_SIZE)
             revert DataMarketErrors.InvalidTransfer();
         if (_receiver == address(0) || _receiver == msg.sender)
