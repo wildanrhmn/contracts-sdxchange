@@ -10,13 +10,6 @@ import "../lib/DataMarketErrors.sol";
 contract PrivacyManager is IPrivacyManager, Ownable, Pausable, ReentrancyGuard {
     using DataMarketErrors for *;
 
-    enum PrivacyLevel {
-        Public,
-        Protected,
-        Private,
-        StrictlyPrivate
-    }
-
     struct PrivateTransaction {
         bytes32 txHash;
         address creator;
@@ -57,7 +50,7 @@ contract PrivacyManager is IPrivacyManager, Ownable, Pausable, ReentrancyGuard {
         bytes32 _zkProof,
         uint8 _privacyLevel
     ) external override nonReentrant whenNotPaused {
-        if (_privacyLevel == uint8(PrivacyLevel.StrictlyPrivate)) {
+        if (_privacyLevel == uint8(PrivacyLevel.Private)) {
             require(
                 _zkProof != bytes32(0) &&
                     _encryptedMetadata.length >= MIN_ENCRYPTION_LENGTH
@@ -180,7 +173,7 @@ contract PrivacyManager is IPrivacyManager, Ownable, Pausable, ReentrancyGuard {
         if (_newEncryptedMetadata.length > MAX_METADATA_SIZE)
             revert DataMarketErrors.InvalidMetadata();
         if (
-            txn.privacyLevel == uint8(PrivacyLevel.StrictlyPrivate) &&
+            txn.privacyLevel == uint8(PrivacyLevel.Private) &&
             _newEncryptedMetadata.length < MIN_ENCRYPTION_LENGTH
         ) {
             revert DataMarketErrors.InvalidMetadata();
