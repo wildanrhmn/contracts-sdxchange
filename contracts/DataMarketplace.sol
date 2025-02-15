@@ -46,7 +46,6 @@ contract DataMarketplace is
         bool isActive;
         uint256 price;
         uint256 totalSales;
-        uint256 validationScore;
         // Security & verification
         bytes encryptedKey;
         bytes32 dataHash;
@@ -69,7 +68,6 @@ contract DataMarketplace is
         bool accessGranted;
         // Verification data
         bytes32 accessProofHash;
-        uint8 consensusStatus;
         bytes32 zkProof;
         bytes32 transferStatus;
     }
@@ -106,7 +104,6 @@ contract DataMarketplace is
     event TransferInitiated(bytes32 indexed transferId, uint256 indexed datasetId);
     event TransferCompleted(bytes32 indexed transferId, uint256 indexed datasetId);
     event ZKProofVerified(uint256 indexed datasetId, address indexed buyer, bool success);
-    event ConsensusStatusUpdated(uint256 indexed datasetId, uint8 status);
     event PrivacyLevelChanged(uint256 indexed datasetId, uint8 newLevel);
     event MetadataUpdated(uint256 indexed datasetId, string newMetadataURI);
     event EmergencyWithdrawal(uint256 indexed datasetId, address indexed user);
@@ -130,131 +127,12 @@ contract DataMarketplace is
         zkVerifier = IZKDataVerifier(_zkVerifierAddress);
     }
 
-    function isDatasetListed(
-        string memory _datasetId
-    ) external view override returns (bool) {
-        uint256 id = uint256(keccak256(bytes(_datasetId)));
-
-        Dataset storage dataset = datasets[id];
-        return dataset.seller != address(0) && dataset.isActive;
-    }
-
-    function verifyDataIntegrity(
-        bytes32 _deliveryHash,
-        bytes32 _originalHash
-    ) external view override returns (bool) {
-        bool found = false;
-        uint256 datasetId;
-
-        for (uint256 i = 0; i < datasetCount; i++) {
-            if (datasets[i].dataHash == _originalHash) {
-                found = true;
-                datasetId = i;
-                break;
-            }
-        }
-
-        if (!found) return false;
-
-        Dataset storage dataset = datasets[datasetId];
-        return dataset.isActive && _deliveryHash == dataset.dataHash;
-    }
-
-    function checkTransferTimeout(bytes32 _transferId) external nonReentrant {
-        Transfer storage transfer = transfers[_transferId];
-        if (transfer.isCompleted) revert DataMarketErrors.AlreadyCompleted();
-        if (block.timestamp <= transfer.startTime + TRANSFER_TIMEOUT) {
-            revert DataMarketErrors.TransferTimeout(_transferId);
-        }
-
-        transfer.isCompleted = true;
-        Purchase storage purchase = purchases[transfer.datasetId][
-            transfer.receiver
-        ];
-
-        escrow.resolveDispute(purchase.escrowId, true);
-
-        purchase.completed = false;
-        purchase.disputed = false;
-
-        emit TransferTimedOut(_transferId, transfer.datasetId);
-    }
-
-    function emergencyWithdraw(
-        uint256 _datasetId
-    ) external onlyOwner nonReentrant {
-        Purchase storage purchase = purchases[_datasetId][msg.sender];
-        if (purchase.escrowId == bytes32(0))
-            revert DataMarketErrors.DatasetNotFound(_datasetId);
-        if (block.timestamp <= purchase.timestamp + EMERGENCY_PERIOD) {
-            revert DataMarketErrors.DisputePeriodNotEnded();
-        }
-
-        escrow.resolveDispute(purchase.escrowId, true);
-        purchase.completed = false;
-        purchase.disputed = false;
-
-        emit EmergencyWithdrawal(_datasetId, msg.sender);
-    }
-
-    function getAllDatasets() external view returns (uint256[] memory) {
-        uint256[] memory activeDatasets = new uint256[](datasetCount);
-        uint256 activeCount = 0;
-
-        for (uint256 i = 0; i < datasetCount; i++) {
-            if (datasets[i].isActive) {
-                activeDatasets[activeCount] = i;
-                activeCount++;
-            }
-        }
-
-        uint256[] memory result = new uint256[](activeCount);
-        for (uint256 i = 0; i < activeCount; i++) {
-            result[i] = activeDatasets[i];
-        }
-
-        return result;
-    }
-
-    function getDatasetDetails(
-        uint256 _datasetId
-    )
-        external
-        view
-        returns (
-            address seller,
-            string memory metadataURI,
-            string memory sampleDataURI,
-            uint256 price,
-            bool isActive,
-            uint256 totalSales,
-            uint256 validationScore
-        )
-    {
-        Dataset storage dataset = datasets[_datasetId];
-
-        return (
-            dataset.seller,
-            dataset.metadataURI,
-            dataset.sampleDataURI,
-            dataset.price,
-            dataset.isActive,
-            dataset.totalSales,
-            dataset.validationScore
-        );
-    }
-
-    function getDatasetsBySeller(
-        address _seller
-    ) external view returns (uint256[] memory) {
-        return userDatasets[_seller];
-    }
-
     function getPaginatedDatasets(
         uint256 _offset,
         uint256 _limit
     ) external view returns (uint256[] memory) {
-        if (_offset >= datasetCount) revert DataMarketErrors.InvalidPaginationParams();
+        if (_offset >= datasetCount)
+            revert DataMarketErrors.InvalidPaginationParams();
 
         uint256 remaining = datasetCount - _offset;
         uint256 count = remaining < _limit ? remaining : _limit;
@@ -272,6 +150,52 @@ contract DataMarketplace is
         return result;
     }
 
+    function getDatasetsBySeller(
+        address _seller,
+        uint256 _offset,
+        uint256 _limit
+    ) external view returns (uint256[] memory) {
+        uint256[] memory sellerDatasets = userDatasets[_seller];
+        if (_offset >= sellerDatasets.length)
+            revert DataMarketErrors.InvalidPaginationParams();
+
+        uint256 remaining = sellerDatasets.length - _offset;
+        uint256 count = remaining < _limit ? remaining : _limit;
+
+        uint256[] memory result = new uint256[](count);
+        for (uint256 i = 0; i < count; i++) {
+            result[i] = sellerDatasets[_offset + i];
+        }
+
+        return result;
+    }
+
+    function getDatasetDetails(
+        uint256 _datasetId
+    )
+        external
+        view
+        returns (
+            address seller,
+            string memory metadataURI,
+            string memory sampleDataURI,
+            uint256 price,
+            bool isActive,
+            uint256 totalSales
+        )
+    {
+        Dataset storage dataset = datasets[_datasetId];
+
+        return (
+            dataset.seller,
+            dataset.metadataURI,
+            dataset.sampleDataURI,
+            dataset.price,
+            dataset.isActive,
+            dataset.totalSales
+        );
+    }
+
     function listDataset(
         string memory _metadataURI,
         string memory _sampleDataURI,
@@ -286,14 +210,19 @@ contract DataMarketplace is
         PrivacyLevel _privacyLevel,
         bytes memory _encryptedMetadata
     ) external whenNotPaused returns (uint256) {
-        if (!userManager.checkIsRegistered(msg.sender)) revert DataMarketErrors.NotRegistered();
-        if (!userManager.checkIsSeller(msg.sender)) revert DataMarketErrors.NotSeller();
-        if (bytes(_metadataURI).length == 0) revert DataMarketErrors.InvalidMetadataURI();
-        if (bytes(_sampleDataURI).length == 0) revert DataMarketErrors.InvalidSampleDataURI();
+        if (!userManager.checkIsRegistered(msg.sender))
+            revert DataMarketErrors.NotRegistered();
+        if (!userManager.checkIsSeller(msg.sender))
+            revert DataMarketErrors.NotSeller();
+        if (bytes(_metadataURI).length == 0)
+            revert DataMarketErrors.InvalidMetadataURI();
+        if (bytes(_sampleDataURI).length == 0)
+            revert DataMarketErrors.InvalidSampleDataURI();
         if (_price == 0) revert DataMarketErrors.InvalidPrice();
         if (_size == 0) revert DataMarketErrors.InvalidDatasetSize();
         if (_sampleSize > _size) revert DataMarketErrors.InvalidSampleSize();
-        if (_encryptedKey.length == 0) revert DataMarketErrors.InvalidEncryptedKey();
+        if (_encryptedKey.length == 0)
+            revert DataMarketErrors.InvalidEncryptedKey();
 
         uint256 datasetId = datasetCount++;
 
@@ -328,7 +257,6 @@ contract DataMarketplace is
             price: _price,
             isActive: true,
             totalSales: 0,
-            validationScore: 0,
             encryptedKey: _encryptedKey,
             dataHash: keccak256(abi.encodePacked(_metadataURI, _size)),
             dataType: _dataType,
@@ -349,11 +277,16 @@ contract DataMarketplace is
         uint256 _datasetId,
         bytes32 _zkProof
     ) external payable nonReentrant whenNotPaused {
-        if (!userManager.checkIsRegistered(msg.sender)) revert DataMarketErrors.NotRegistered();
+        if (!userManager.checkIsRegistered(msg.sender))
+            revert DataMarketErrors.NotRegistered();
         Dataset storage dataset = datasets[_datasetId];
         if (!dataset.isActive) revert DataMarketErrors.DatasetNotAvailable();
-        if (msg.value < dataset.price) revert DataMarketErrors.InsufficientPayment();
-        if (dataset.privacyLevel != PrivacyLevel.Public && !authorizedBuyers[_datasetId][msg.sender]) {
+        if (msg.value < dataset.price)
+            revert DataMarketErrors.InsufficientPayment();
+        if (
+            dataset.privacyLevel != PrivacyLevel.Public &&
+            !authorizedBuyers[_datasetId][msg.sender]
+        ) {
             revert DataMarketErrors.NotAuthorizedForPrivateDataset();
         }
 
@@ -366,7 +299,8 @@ contract DataMarketplace is
             );
             if (!proofValid) revert DataMarketErrors.ZKVerificationRequired();
         } else if (dataset.verificationType == VerificationType.Basic) {
-            if (!verifyBasicIntegrity(dataset.dataHash)) revert DataMarketErrors.InvalidDataHash();
+            if (!verifyBasicIntegrity(dataset.dataHash))
+                revert DataMarketErrors.InvalidDataHash();
         }
 
         bytes32 transferId = transferProtocol.initiateTransfer(
@@ -375,6 +309,8 @@ contract DataMarketplace is
             dataset.encryptedKey,
             dataset.size
         );
+
+        consensusManager.initiateValidation(transferId);
 
         bytes32 escrowId = escrow.createEscrow{value: dataset.price}(
             payable(dataset.seller),
@@ -390,13 +326,50 @@ contract DataMarketplace is
             escrowId: escrowId,
             zkVerified: dataset.verificationType == VerificationType.ZKProof,
             accessProofHash: bytes32(0),
-            consensusStatus: 0,
             zkProof: _zkProof,
             transferStatus: transferId,
             accessGranted: true
         });
 
         emit DatasetPurchased(_datasetId, msg.sender, escrowId);
+    }
+
+    function confirmDataTransfer(
+        uint256 _datasetId,
+        bytes32 _deliveryProof
+    ) external nonReentrant whenNotPaused {
+        Purchase storage purchase = purchases[_datasetId][msg.sender];
+        Dataset storage dataset = datasets[_datasetId];
+
+        if (purchase.escrowId == bytes32(0))
+            revert DataMarketErrors.DatasetNotFound(_datasetId);
+        if (purchase.completed) revert DataMarketErrors.AlreadyCompleted();
+
+        (, , bool consensusReached, bool approved, , ) = consensusManager
+            .getValidationDetails(purchase.escrowId);
+
+        if (!consensusReached) revert DataMarketErrors.ConsensusNotReached();
+        if (!approved) revert DataMarketErrors.ConsensusRejected();
+
+        if (
+            dataset.verificationType != VerificationType.ZKProof &&
+            !purchase.zkVerified
+        ) {
+            revert DataMarketErrors.ZKVerificationRequired();
+        }
+
+        transferProtocol.confirmTransfer(
+            purchase.transferStatus,
+            _deliveryProof
+        );
+
+        escrow.confirmDelivery(purchase.escrowId, _deliveryProof);
+        escrow.releaseFunds(purchase.escrowId);
+
+        purchase.completed = true;
+        dataset.totalSales++;
+
+        emit TransferCompleted(purchase.transferStatus, _datasetId);
     }
 
     function getTransferProgress(
@@ -433,10 +406,6 @@ contract DataMarketplace is
             datasets[_datasetId].totalSales++;
             emit TransferCompleted(purchase.transferStatus, _datasetId);
         }
-    }
-
-    function initiateValidation(bytes32 _transferId) internal {
-        consensusManager.initiateValidation(_transferId);
     }
 
     function getTransferDetails(
@@ -546,103 +515,14 @@ contract DataMarketplace is
         emit PrivacyLevelChanged(_datasetId, uint8(_newLevel));
     }
 
-    function grantAccess(uint256 _datasetId, address _buyer) external {
-        Dataset storage dataset = datasets[_datasetId];
-        if (msg.sender != dataset.seller) revert DataMarketErrors.NotDatasetOwner();
-        if (dataset.privacyLevel == PrivacyLevel.Public) revert DataMarketErrors.DatasetIsPublic();
-
-        authorizedBuyers[_datasetId][_buyer] = true;
-        emit AccessGranted(_datasetId, _buyer);
-    }
-
-    function revokeAccess(uint256 _datasetId, address _buyer) external {
-        Dataset storage dataset = datasets[_datasetId];
-        if (msg.sender != dataset.seller) revert DataMarketErrors.NotDatasetOwner();
-        if (dataset.privacyLevel == PrivacyLevel.Public) revert DataMarketErrors.DatasetIsPublic();
-
-        authorizedBuyers[_datasetId][_buyer] = false;
-        emit AccessRevoked(_datasetId, _buyer);
-    }
-
-    function initiateTransfer(uint256 _datasetId) internal returns (bytes32) {
-        bytes32 transferId = keccak256(
-            abi.encodePacked(_datasetId, msg.sender, block.timestamp)
-        );
-
-        transfers[transferId] = Transfer({
-            transferId: transferId,
-            datasetId: _datasetId,
-            sender: datasets[_datasetId].seller,
-            receiver: msg.sender,
-            startTime: block.timestamp,
-            completedTime: 0,
-            isCompleted: false
-        });
-
-        emit TransferInitiated(transferId, _datasetId);
-        return transferId;
-    }
-
-    function confirmDelivery(
-        uint256 _datasetId,
-        bytes32 _deliveryHash
-    ) external whenNotPaused {
-        Purchase storage purchase = purchases[_datasetId][msg.sender];
-        Dataset storage dataset = datasets[_datasetId];
-
-        (, , bool consensusReached, bool approved, , ) = consensusManager
-            .getValidationDetails(purchase.escrowId);
-
-        if (!consensusReached) revert DataMarketErrors.ConsensusNotReached();
-        if (!approved) revert DataMarketErrors.ConsensusRejected();
-        if (purchase.escrowId == bytes32(0)) revert DataMarketErrors.DatasetNotFound(_datasetId);
-        if (purchase.completed) revert DataMarketErrors.AlreadyCompleted();
-
-        if (
-            dataset.verificationType != VerificationType.ZKProof &&
-            !purchase.zkVerified
-        ) {
-            revert DataMarketErrors.ZKVerificationRequired();
-        }
-
-        if (!transfers[purchase.transferStatus].isCompleted) {
-            revert DataMarketErrors.TransferNotCompleted(
-                purchase.transferStatus
-            );
-        }
-
-        escrow.confirmDelivery(purchase.escrowId, _deliveryHash);
-        escrow.releaseFunds(purchase.escrowId);
-
-        purchase.completed = true;
-        dataset.totalSales++;
-    }
-
-    function confirmDataTransfer(
-        uint256 _datasetId,
-        bytes32 _deliveryProof
-    ) external nonReentrant whenNotPaused {
-        Purchase storage purchase = purchases[_datasetId][msg.sender];
-        if (purchase.completed) revert DataMarketErrors.AlreadyCompleted();
-
-        transferProtocol.confirmTransfer(
-            purchase.transferStatus,
-            _deliveryProof
-        );
-
-        purchase.completed = true;
-        datasets[_datasetId].totalSales++;
-
-        emit TransferCompleted(purchase.transferStatus, _datasetId);
-    }
-
     function updateDataset(
         uint256 _datasetId,
         uint256 _newPrice,
         bool _isActive
     ) external whenNotPaused {
         Dataset storage dataset = datasets[_datasetId];
-        if (dataset.seller != msg.sender) revert DataMarketErrors.NotDatasetOwner();
+        if (dataset.seller != msg.sender)
+            revert DataMarketErrors.NotDatasetOwner();
 
         if (_newPrice > 0) {
             dataset.price = _newPrice;
@@ -654,7 +534,8 @@ contract DataMarketplace is
 
     function raiseDispute(uint256 _datasetId) external whenNotPaused {
         Purchase storage purchase = purchases[_datasetId][msg.sender];
-        if (purchase.escrowId == bytes32(0)) revert DataMarketErrors.PurchaseNotFound();
+        if (purchase.escrowId == bytes32(0))
+            revert DataMarketErrors.PurchaseNotFound();
         if (purchase.disputed) revert DataMarketErrors.AlreadyDisputed();
 
         escrow.raiseDispute(purchase.escrowId);
@@ -684,6 +565,95 @@ contract DataMarketplace is
         emit DisputeResolved(_datasetId, _buyer, _refundBuyer);
     }
 
+    function grantAccess(uint256 _datasetId, address _buyer) external {
+        Dataset storage dataset = datasets[_datasetId];
+        if (msg.sender != dataset.seller)
+            revert DataMarketErrors.NotDatasetOwner();
+        if (dataset.privacyLevel == PrivacyLevel.Public)
+            revert DataMarketErrors.DatasetIsPublic();
+
+        authorizedBuyers[_datasetId][_buyer] = true;
+        emit AccessGranted(_datasetId, _buyer);
+    }
+
+    function revokeAccess(uint256 _datasetId, address _buyer) external {
+        Dataset storage dataset = datasets[_datasetId];
+        if (msg.sender != dataset.seller)
+            revert DataMarketErrors.NotDatasetOwner();
+        if (dataset.privacyLevel == PrivacyLevel.Public)
+            revert DataMarketErrors.DatasetIsPublic();
+
+        authorizedBuyers[_datasetId][_buyer] = false;
+        emit AccessRevoked(_datasetId, _buyer);
+    }
+
+    function isDatasetListed(
+        string memory _datasetId
+    ) external view override returns (bool) {
+        uint256 id = uint256(keccak256(bytes(_datasetId)));
+
+        Dataset storage dataset = datasets[id];
+        return dataset.seller != address(0) && dataset.isActive;
+    }
+
+    function verifyDataIntegrity(
+        bytes32 _deliveryHash,
+        bytes32 _originalHash
+    ) external view override returns (bool) {
+        bool found = false;
+        uint256 datasetId;
+
+        for (uint256 i = 0; i < datasetCount; i++) {
+            if (datasets[i].dataHash == _originalHash) {
+                found = true;
+                datasetId = i;
+                break;
+            }
+        }
+
+        if (!found) return false;
+
+        Dataset storage dataset = datasets[datasetId];
+        return dataset.isActive && _deliveryHash == dataset.dataHash;
+    }
+
+    function checkTransferTimeout(bytes32 _transferId) external nonReentrant {
+        Transfer storage transfer = transfers[_transferId];
+        if (transfer.isCompleted) revert DataMarketErrors.AlreadyCompleted();
+        if (block.timestamp <= transfer.startTime + TRANSFER_TIMEOUT) {
+            revert DataMarketErrors.TransferTimeout(_transferId);
+        }
+
+        transfer.isCompleted = true;
+        Purchase storage purchase = purchases[transfer.datasetId][
+            transfer.receiver
+        ];
+
+        escrow.resolveDispute(purchase.escrowId, true);
+
+        purchase.completed = false;
+        purchase.disputed = false;
+
+        emit TransferTimedOut(_transferId, transfer.datasetId);
+    }
+
+    function emergencyWithdraw(
+        uint256 _datasetId
+    ) external onlyOwner nonReentrant {
+        Purchase storage purchase = purchases[_datasetId][msg.sender];
+        if (purchase.escrowId == bytes32(0))
+            revert DataMarketErrors.DatasetNotFound(_datasetId);
+        if (block.timestamp <= purchase.timestamp + EMERGENCY_PERIOD) {
+            revert DataMarketErrors.DisputePeriodNotEnded();
+        }
+
+        escrow.resolveDispute(purchase.escrowId, true);
+        purchase.completed = false;
+        purchase.disputed = false;
+
+        emit EmergencyWithdrawal(_datasetId, msg.sender);
+    }
+
     function updatePlatformFee(uint256 _newFee) external onlyOwner {
         if (_newFee > 1000) revert DataMarketErrors.InvalidPlatformFee();
         platformFee = _newFee;
@@ -703,6 +673,7 @@ contract DataMarketplace is
     ) external view returns (bool) {
         return purchases[_datasetId][_user].completed;
     }
+
     function withdrawBalance() external onlyOwner {
         uint256 balance = address(this).balance;
         (bool success, ) = msg.sender.call{value: balance}("");

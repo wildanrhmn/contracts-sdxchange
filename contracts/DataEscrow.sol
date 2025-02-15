@@ -253,30 +253,6 @@ contract DataEscrow is IDataEscrow, ReentrancyGuard, Ownable, Pausable {
         emit ProofSubmitted(_transactionId, _proofHash);
     }
 
-    function validateTransaction(
-        bytes32 _transactionId,
-        bool _approved
-    ) external nonReentrant whenNotPaused {
-        EscrowTransaction storage transaction = transactions[_transactionId];
-        if (!isValidator(msg.sender)) revert DataMarketErrors.NotValidator();
-        if (transaction.isReleased) revert DataMarketErrors.FundsAlreadyReleased();
-        if (transaction.validators[msg.sender]) revert DataMarketErrors.AlreadyValidated();
-
-        transaction.validators[msg.sender] = true;
-
-        if (_approved) {
-            transaction.approvalCount++;
-        } else {
-            transaction.rejectionCount++;
-        }
-
-        if (hasConsensus(_transactionId)) {
-            bool consensusApproved = transaction.approvalCount > transaction.rejectionCount;
-            transaction.consensusStatus = consensusApproved ? 1 : 2;
-            emit ConsensusReached(_transactionId, consensusApproved);
-        }
-    }
-
     function getUserTransactions(
         address _user
     ) external view returns (bytes32[] memory) {

@@ -10,11 +10,12 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
     using DataMarketErrors for *;
 
     struct Validator {
-        bool isRegistered;
         uint256 stakedAmount;
         uint256 registrationDate;
         uint256 validationsCount;
         uint256 successfulValidations;
+        string profileURI;
+        bool isRegistered;
         bool isActive;
     }
 
@@ -53,7 +54,7 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
 
     constructor() Ownable(msg.sender) {}
 
-    function registerAsValidator() external payable whenNotPaused {
+    function registerAsValidator(string memory _profileURI) external payable whenNotPaused {
         require(msg.value >= MINIMUM_STAKE, "Insufficient stake");
         require(!validators[msg.sender].isRegistered, "Already registered");
 
@@ -63,7 +64,8 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
             registrationDate: block.timestamp,
             validationsCount: 0,
             successfulValidations: 0,
-            isActive: true
+            isActive: true,
+            profileURI: _profileURI
         });
 
         validatorAddresses[currentValidatorIndex] = msg.sender;
@@ -71,30 +73,6 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
         validatorCount++;
         
         emit ValidatorRegistered(msg.sender, msg.value);
-    }
-
-    function increaseStake() external payable whenNotPaused {
-        Validator storage validator = validators[msg.sender];
-        require(validator.isRegistered, "Not a validator");
-        require(validator.isActive, "Validator not active");
-
-        validator.stakedAmount += msg.value;
-        emit ValidatorStakeIncreased(msg.sender, validator.stakedAmount);
-    }
-
-    function withdrawStake() external whenNotPaused {
-        Validator storage validator = validators[msg.sender];
-        require(validator.isRegistered, "Not a validator");
-        require(validator.isActive, "Validator not active");
-        require(block.timestamp >= validator.registrationDate + 30 days, "Withdrawal locked");
-
-        uint256 stakeToReturn = validator.stakedAmount;
-        validator.stakedAmount = 0;
-        validator.isActive = false;
-        validatorCount--;
-
-        payable(msg.sender).transfer(stakeToReturn);
-        emit ValidatorDeactivated(msg.sender);
     }
 
     function removeValidator(address _validator) external onlyOwner {
@@ -107,56 +85,6 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
         validator.isActive = false;
         validatorCount--;
         emit ValidatorRemoved(_validator);
-    }
-
-    function getValidationDetails(
-        bytes32 _transferId
-    )
-        external
-        view
-        override
-        returns (
-            uint256 approvalCount,
-            uint256 rejectionCount,
-            bool consensusReached,
-            bool approved,
-            uint256 validationStartTime,
-            uint256 totalValidatorCount
-        )
-    {
-        ValidationResult storage validation = validations[_transferId];
-        return (
-            validation.approvalCount,
-            validation.rejectionCount,
-            validation.consensusReached,
-            validation.approved,
-            validation.startTime,
-            validation.validatorCount
-        );
-    }
-
-    function getValidatorAtIndex(uint256 _index) public view returns (address) {
-        require(_index < currentValidatorIndex, "Index out of bounds");
-        return validatorAddresses[_index];
-    }
-
-    function getAllActiveValidators() external view returns (address[] memory) {
-        address[] memory activeValidators = new address[](validatorCount);
-        uint256 activeCount = 0;
-        
-        for(uint256 i = 0; i < currentValidatorIndex; i++) {
-            address validatorAddr = validatorAddresses[i];
-            if(validators[validatorAddr].isActive) {
-                activeValidators[activeCount] = validatorAddr;
-                activeCount++;
-            }
-        }
-        
-        assembly {
-            mstore(activeValidators, activeCount)
-        }
-        
-        return activeValidators;
     }
 
     function initiateValidation(bytes32 _transferId) external override {
@@ -222,6 +150,80 @@ contract ConsensusValidator is IConsensusValidator, Ownable, Pausable {
 
             emit ConsensusReached(_transferId, validation.approved);
         }
+    }
+
+    function getValidationDetails(
+        bytes32 _transferId
+    )
+        external
+        view
+        override
+        returns (
+            uint256 approvalCount,
+            uint256 rejectionCount,
+            bool consensusReached,
+            bool approved,
+            uint256 validationStartTime,
+            uint256 totalValidatorCount
+        )
+    {
+        ValidationResult storage validation = validations[_transferId];
+        return (
+            validation.approvalCount,
+            validation.rejectionCount,
+            validation.consensusReached,
+            validation.approved,
+            validation.startTime,
+            validation.validatorCount
+        );
+    }
+
+    function getValidatorAtIndex(uint256 _index) public view returns (address) {
+        require(_index < currentValidatorIndex, "Index out of bounds");
+        return validatorAddresses[_index];
+    }
+
+    function getAllActiveValidators() external view returns (address[] memory) {
+        address[] memory activeValidators = new address[](validatorCount);
+        uint256 activeCount = 0;
+        
+        for(uint256 i = 0; i < currentValidatorIndex; i++) {
+            address validatorAddr = validatorAddresses[i];
+            if(validators[validatorAddr].isActive) {
+                activeValidators[activeCount] = validatorAddr;
+                activeCount++;
+            }
+        }
+        
+        assembly {
+            mstore(activeValidators, activeCount)
+        }
+        
+        return activeValidators;
+    }
+
+    function increaseStake() external payable whenNotPaused {
+        Validator storage validator = validators[msg.sender];
+        require(validator.isRegistered, "Not a validator");
+        require(validator.isActive, "Validator not active");
+
+        validator.stakedAmount += msg.value;
+        emit ValidatorStakeIncreased(msg.sender, validator.stakedAmount);
+    }
+
+    function withdrawStake() external whenNotPaused {
+        Validator storage validator = validators[msg.sender];
+        require(validator.isRegistered, "Not a validator");
+        require(validator.isActive, "Validator not active");
+        require(block.timestamp >= validator.registrationDate + 30 days, "Withdrawal locked");
+
+        uint256 stakeToReturn = validator.stakedAmount;
+        validator.stakedAmount = 0;
+        validator.isActive = false;
+        validatorCount--;
+
+        payable(msg.sender).transfer(stakeToReturn);
+        emit ValidatorDeactivated(msg.sender);
     }
 
     function hasValidConsensus(bytes32 _transferId) external view override returns (bool) {
