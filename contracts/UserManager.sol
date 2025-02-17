@@ -4,128 +4,200 @@ pragma solidity ^0.8.28;
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "../lib/DataMarketInterface.sol";
 
-contract UserManager is Ownable, Pausable, ReentrancyGuard {
+contract UserManager is IUserManager, Ownable, Pausable, ReentrancyGuard {
+
     struct User {
-        bool isRegistered;
         string profileURI;
         uint256 registerDate;
-        uint256 reputation;
-        bool isSeller;
-        address[] authorizedDevices;
-        uint256 salesCount;
-        uint256 purchaseCount;
-        mapping(bytes32 => bool) roles;
+        bool isRegistered;
+        UserRole role;
     }
 
+    struct Validator {
+        uint256 stakedAmount;
+        uint256 validationsCount;
+        uint256 successfulValidations;
+        bool isActive;
+    }
+
+    uint256 public validatorCount;
+    uint256 public minValidators = 3;
+    uint256 public constant MINIMUM_STAKE = 0.0001 ether;
+    
     mapping(address => User) public users;
-    mapping(string => address) public usernameToAddress;
-    mapping(address => bool) public authorizedContracts;
+    mapping(address => Validator) public validators;
+    mapping(uint256 => address) private validatorAddresses;
+    uint256 private currentValidatorIndex;
 
-    event UserRegistered(address indexed user, string profileURI);
-    event SellerRegistered(address indexed seller);
-    event ReputationUpdated(address indexed user, uint256 newScore);
-    event ContractAuthorized(address indexed contractAddress);
-    event ContractDeauthorized(address indexed contractAddress);
+    IConsensusValidator public consensusValidator;
 
-    constructor() Ownable(msg.sender) {}
+    event UserRegistered(address indexed user, string profileURI, UserRole role);
+    event ValidatorRegistered(address indexed validator, uint256 stake);
+    event ValidatorStakeIncreased(address indexed validator, uint256 newStake);
+    event ValidatorStatsUpdated(address indexed validator, uint256 totalValidations, uint256 successfulValidations);
+    event ValidatorDeactivated(address indexed validator);
 
-    function authorizeContract(address _contract) external onlyOwner {
-        authorizedContracts[_contract] = true;
-        emit ContractAuthorized(_contract);
+    constructor(address _consensusValidator) Ownable(msg.sender) {
+        consensusValidator = IConsensusValidator(_consensusValidator);
     }
 
-    function deauthorizeContract(address _contract) external onlyOwner {
-        authorizedContracts[_contract] = false;
-        emit ContractDeauthorized(_contract);
+    function setConsensusValidator(address _consensusValidator) external onlyOwner {
+        consensusValidator = IConsensusValidator(_consensusValidator);
     }
 
     function registerUser(
         string memory _profileURI,
-        string memory _username
-    ) external nonReentrant whenNotPaused {
+        UserRole _role
+    ) external payable nonReentrant whenNotPaused {
         require(!users[msg.sender].isRegistered, "Already registered");
-        require(usernameToAddress[_username] == address(0), "Username taken");
         require(bytes(_profileURI).length > 0, "Invalid profile URI");
-        require(bytes(_username).length > 0, "Invalid username");
 
-        User storage newUser = users[msg.sender];
-        newUser.isRegistered = true;
-        newUser.profileURI = _profileURI;
-        newUser.registerDate = block.timestamp;
-        newUser.reputation = 0;
-        
-        usernameToAddress[_username] = msg.sender;
-        
-        emit UserRegistered(msg.sender, _profileURI);
-    }
+        // If registering as validator, check stake
+        if (_role == UserRole.Validator) {
+            require(msg.value >= MINIMUM_STAKE, "Insufficient stake");
+            
+            validators[msg.sender] = Validator({
+                stakedAmount: msg.value,
+                validationsCount: 0,
+                successfulValidations: 0,
+                isActive: true
+            });
 
-    function registerAsSeller(
-        address[] memory _paymentAddresses,
-        string memory _sellerMetadata
-    ) external nonReentrant whenNotPaused {
-        require(users[msg.sender].isRegistered, "Not registered");
-        require(!users[msg.sender].isSeller, "Already a seller");
-        require(bytes(_sellerMetadata).length > 0, "Invalid metadata");
-        require(_paymentAddresses.length > 0, "No payment addresses");
+            validatorAddresses[currentValidatorIndex] = msg.sender;
+            currentValidatorIndex++;
+            validatorCount++;
+        } else {
+            require(msg.value == 0, "Only validators need stake");
+        }
 
-        User storage user = users[msg.sender];
-        user.isSeller = true;
-        user.authorizedDevices = _paymentAddresses;
+        users[msg.sender] = User({
+            profileURI: _profileURI,
+            registerDate: block.timestamp,
+            isRegistered: true,
+            role: _role
+        });
 
-        emit SellerRegistered(msg.sender);
-    }
-
-    function updateReputation(address _user, uint256 _score) external {
-        require(authorizedContracts[msg.sender], "Unauthorized");
-        require(users[_user].isRegistered, "User not registered");
-        require(_score <= 100, "Invalid score");
-
-        users[_user].reputation = _score;
-        emit ReputationUpdated(_user, _score);
+        emit UserRegistered(msg.sender, _profileURI, _role);
+        if (_role == UserRole.Validator) {
+            emit ValidatorRegistered(msg.sender, msg.value);
+        }
     }
 
     function getUserDetails(address _user) external view returns (
         bool isRegistered,
         string memory profileURI,
         uint256 registerDate,
-        uint256 reputation,
-        bool isSeller,
-        uint256 salesCount,
-        uint256 purchaseCount
+        UserRole role,
+        // Additional validator details if applicable
+        bool isValidator,
+        uint256 stakedAmount,
+        bool isActive,
+        uint256 validationsCount,
+        uint256 successfulValidations
     ) {
         User storage user = users[_user];
+        Validator storage validator = validators[_user];
+        
         return (
             user.isRegistered,
             user.profileURI,
             user.registerDate,
-            user.reputation,
-            user.isSeller,
-            user.salesCount,
-            user.purchaseCount
+            user.role,
+            user.role == UserRole.Validator,
+            validator.stakedAmount,
+            validator.isActive,
+            validator.validationsCount,
+            validator.successfulValidations
         );
     }
 
-    function getAuthorizedDevices(address _user) external view returns (address[] memory) {
-        return users[_user].authorizedDevices;
+    function increaseValidatorStake() external payable whenNotPaused {
+        require(users[msg.sender].role == UserRole.Validator, "Not a validator");
+        require(validators[msg.sender].isActive, "Validator not active");
+
+        validators[msg.sender].stakedAmount += msg.value;
+        emit ValidatorStakeIncreased(msg.sender, validators[msg.sender].stakedAmount);
     }
 
-    function updateUserSalesCount(address _user) external {
-        require(authorizedContracts[msg.sender], "Unauthorized");
-        users[_user].salesCount++;
+    function withdrawValidatorStake() external nonReentrant whenNotPaused {
+        require(users[msg.sender].role == UserRole.Validator, "Not a validator");
+        require(validators[msg.sender].isActive, "Validator not active");
+        require(block.timestamp >= users[msg.sender].registerDate + 30 days, "Withdrawal locked");
+
+        uint256 stakeToReturn = validators[msg.sender].stakedAmount;
+        validators[msg.sender].stakedAmount = 0;
+        validators[msg.sender].isActive = false;
+        validatorCount--;
+
+        payable(msg.sender).transfer(stakeToReturn);
+        emit ValidatorDeactivated(msg.sender);
     }
 
-    function updateUserPurchaseCount(address _user) external {
-        require(authorizedContracts[msg.sender], "Unauthorized");
-        users[_user].purchaseCount++;
+    function getAllActiveValidators() external view override returns (address[] memory) {
+        address[] memory activeValidators = new address[](validatorCount);
+        uint256 activeCount = 0;
+        
+        for(uint256 i = 0; i < currentValidatorIndex; i++) {
+            address validatorAddr = validatorAddresses[i];
+            if(validators[validatorAddr].isActive) {
+                activeValidators[activeCount] = validatorAddr;
+                activeCount++;
+            }
+        }
+        
+        assembly {
+            mstore(activeValidators, activeCount)
+        }
+        
+        return activeValidators;
     }
 
+    function getValidatorCount() external view override returns (uint256) {
+        return validatorCount;
+    }
+
+    function updateValidatorStats(address _validator, bool _success) public {
+        require(msg.sender == address(consensusValidator), "Only consensus validator");
+        require(users[_validator].role == UserRole.Validator, "Not a validator");
+        require(validators[_validator].isActive, "Validator not active");
+
+        validators[_validator].validationsCount++;
+        if (_success) {
+            validators[_validator].successfulValidations++;
+        }
+
+        emit ValidatorStatsUpdated(_validator, validators[_validator].validationsCount, validators[_validator].successfulValidations);
+    }
+
+    // Helper functions
     function checkIsRegistered(address _user) external view returns (bool) {
         return users[_user].isRegistered;
     }
 
-    function checkIsSeller(address _user) external view returns (bool) {
-        return users[_user].isSeller;
+    function checkRole(address _user) external view returns (UserRole) {
+        return users[_user].role;
+    }
+
+    function checkIsActiveValidator(address _user) external view override returns (bool) {
+        return users[_user].role == UserRole.Validator && validators[_user].isActive;
+    }
+
+    function setMinValidators(uint256 _minValidators) external onlyOwner {
+        minValidators = _minValidators;
+    }
+
+    // Emergency functions
+    function emergencyWithdraw(address _validator) external onlyOwner {
+        require(users[_validator].role == UserRole.Validator, "Not a validator");
+        require(validators[_validator].stakedAmount > 0, "No stake found");
+
+        uint256 stakeToReturn = validators[_validator].stakedAmount;
+        validators[_validator].stakedAmount = 0;
+        validators[_validator].isActive = false;
+        
+        payable(_validator).transfer(stakeToReturn);
     }
 
     function pause() external onlyOwner {

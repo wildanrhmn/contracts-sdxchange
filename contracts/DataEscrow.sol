@@ -74,7 +74,7 @@ contract DataEscrow is IDataEscrow, ReentrancyGuard, Ownable, Pausable {
         bytes32 _dataHash
     ) external payable override nonReentrant whenNotPaused returns (bytes32) {
         if (!userManager.checkIsRegistered(msg.sender)) revert DataMarketErrors.NotRegistered();
-        if (!userManager.checkIsSeller(_seller)) revert DataMarketErrors.NotSeller();
+        if (userManager.checkRole(_seller) != UserRole.Seller) revert DataMarketErrors.NotSeller();
         if (!marketplace.isDatasetListed(_datasetId)) revert DataMarketErrors.DatasetNotFound(0);
         if (msg.value == 0) revert DataMarketErrors.InvalidAmount();
         if (_seller == address(0)) revert DataMarketErrors.InvalidAddress();
@@ -111,7 +111,7 @@ contract DataEscrow is IDataEscrow, ReentrancyGuard, Ownable, Pausable {
         transaction.privacyProof = bytes32(0);
         transaction.encryptionLevel = 0;
         transaction.encryptedMetadata = "";
-        transaction.validatorCount = consensusValidator.getValidatorCount();
+        transaction.validatorCount = userManager.getValidatorCount();
         transaction.approvalCount = 0;
         transaction.rejectionCount = 0;
 

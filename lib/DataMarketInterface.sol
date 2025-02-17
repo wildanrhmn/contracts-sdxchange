@@ -20,6 +20,12 @@ enum PrivacyLevel {
     Private
 }
 
+enum UserRole {
+    Buyer,
+    Seller,
+    Validator
+}
+
 interface IDataMarketplace {
     function isDatasetListed(
         string memory datasetId
@@ -29,6 +35,13 @@ interface IDataMarketplace {
         bytes32 deliveryHash,
         bytes32 originalHash
     ) external view returns (bool);
+}
+
+interface IUserManager {
+    function checkIsActiveValidator(address _user) external view returns (bool);
+    function getValidatorCount() external view returns (uint256);
+    function getAllActiveValidators() external view returns (address[] memory);
+    function updateValidatorStats(address _validator, bool _success) external;
 }
 
 interface IDataEscrow {
@@ -56,8 +69,6 @@ interface IDataEscrow {
 
 interface IConsensusValidator {
     function hasValidConsensus(bytes32 transferId) external view returns (bool);
-
-    function getValidatorCount() external view returns (uint256);
 
     function initiateValidation(bytes32 transferId) external;
 

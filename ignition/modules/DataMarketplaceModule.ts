@@ -1,11 +1,13 @@
 import { buildModule } from "@nomicfoundation/hardhat-ignition/modules";
 
+const tempAddress = "0x0000000000000000000000000000000000000000";
+
 const DataMarketplaceModule = buildModule("DataMarketplaceModule", (m) => {
   // Deploy UserManager first
-  const userManager = m.contract("UserManager");
+  const userManager = m.contract("UserManager", [tempAddress]);
 
   // Deploy ConsensusValidator
-  const consensusValidator = m.contract("ConsensusValidator");
+  const consensusValidator = m.contract("ConsensusValidator", [userManager]);
 
   // Deploy ZKDataVerifier
   const zkDataVerifier = m.contract("ZKDataVerifier");
@@ -33,6 +35,9 @@ const DataMarketplaceModule = buildModule("DataMarketplaceModule", (m) => {
 
   // Setup marketplace in escrow
   m.call(dataEscrow, "setMarketplace", [dataMarketplace]);
+
+  // Setup consensus validator in user manager
+  m.call(userManager, "setConsensusValidator", [consensusValidator]);
 
   return {
     userManager,

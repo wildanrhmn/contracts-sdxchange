@@ -212,7 +212,7 @@ contract DataMarketplace is
     ) external whenNotPaused returns (uint256) {
         if (!userManager.checkIsRegistered(msg.sender))
             revert DataMarketErrors.NotRegistered();
-        if (!userManager.checkIsSeller(msg.sender))
+        if (userManager.checkRole(msg.sender) != UserRole.Seller)
             revert DataMarketErrors.NotSeller();
         if (bytes(_metadataURI).length == 0)
             revert DataMarketErrors.InvalidMetadataURI();
